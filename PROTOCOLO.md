@@ -1,6 +1,6 @@
 # Protocolo miolo ↔ destino (versão 1)
 
-O `quadro-voz` (miolo) entende a frase falada e produz uma **ação**. Quem grava a ação em algum lugar é o **destino**: qualquer executável, em qualquer linguagem, que responda aos subcomandos abaixo. O destino é escolhido em `~/.config/quadro-voz/config.toml`:
+O `quadro-voz` (o miolo) entende a frase falada e produz uma ação. Um destino grava essa ação em algum lugar; ele pode ser qualquer executável, em qualquer linguagem, que responda aos subcomandos abaixo. Você escolhe o destino em `~/.config/quadro-voz/config.toml`:
 
 ```toml
 destino = ["/caminho/do/destino", "--opcao-do-destino", "valor"]
@@ -22,7 +22,7 @@ O miolo usa essa lista para reconhecer a coluna falada ("na coluna fazendo"). Um
 
 ### `aplicar`
 
-Lê **uma** ação JSON do stdin e aplica. Em sucesso, sai com código 0 e imprime:
+Lê uma única ação JSON do stdin e aplica. Em sucesso, sai com código 0 e imprime:
 
 ```json
 {"uid": "427", "resumo": "estudar redes ⏫ 📅 2026-11-13 🆔 427  →  A fazer"}
@@ -53,7 +53,7 @@ Os nomes dos campos vêm do VTODO do iCalendar (RFC 5545), para que destinos bas
 | Campo | Tipo | Significado |
 |---|---|---|
 | `summary` | string, não vazia | nome da tarefa |
-| `priority` | inteiro 1–9 ou `null` | escala do VTODO: 1 = mais alta, 9 = mais baixa. O miolo usa 1 (máxima), 3 (alta), 5 (média), 7 (baixa), 9 (mínima) |
+| `priority` | inteiro de 1 a 9 ou `null` | escala do VTODO: 1 = mais alta, 9 = mais baixa. O miolo usa 1 (máxima), 3 (alta), 5 (média), 7 (baixa), 9 (mínima) |
 | `dtstart` | `AAAA-MM-DD` ou `null` | quando começa |
 | `due` | `AAAA-MM-DD` ou `null` | prazo |
 | `coluna` | string ou `null` | uma das colunas que o destino listou. `null` = o destino escolhe a padrão |
