@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Destino do quadro-voz para um quadro do plugin Kanban do Obsidian (formato do plugin Tasks).
+
+Subcomandos (ver PROTOCOLO.md):
+  colunas    imprime as colunas do quadro em JSON
+  aplicar    lê uma ação JSON do stdin e aplica no quadro
+  dar-ids    dá 🆔 aos cards que ainda não têm (extra deste destino)
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import random
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+VERSAO_PROTOCOLO = 1
+
+# PRIORITY do VTODO -> emoji do plugin Tasks. Valores intermediários caem no mais próximo.
+EMOJI_PRIORIDADE = {1: "🔺", 3: "⏫", 5: "🔼", 7: "🔽", 9: "⏬"}
+
+RE_ID = re.compile(r"🆔\s*([\w-]+)")
+RE_FEITO = re.compile(r"\s*✅\s*\d{4}-\d{2}-\d{2}")
+# O Kanban guarda configurações (e o arquivo morto) depois destas linhas.
+FIM_DAS_COLUNAS = re.compile(r"^(%% kanban:settings|\*\*\*\s*$)")
+
+
+def chave(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn")
+
+
+def emoji_prioridade(p: int) -> str:
+    return EMOJI_PRIORIDADE[min(EMOJI_PRIORIDADE, key=lambda k: abs(k - p))]
+
+
+def marcar_feito(linha: str) -> str:
+    linha = re.sub(r"^- \[.\]", "- [x]", linha)
+    return linha if RE_FEITO.search(linha) else f"{linha.rstrip()} ✅ {dt.date.today().isoformat()}"
+
+
+def desmarcar_feito(linha: str) -> str:
+    return RE_FEITO.sub("", re.sub(r"^- \[x\]", "- [ ]", linha, flags=re.I))
+
+
+class Quadro:
+    def __init__(self, caminho: Path, coluna_padrao: str, coluna_feito: str):
+        self.caminho = caminho
+        self.arquivo = caminho.with_name("Arquivo.md")
+        self.coluna_padrao, self.coluna_feito = coluna_padrao, coluna_feito
+        self.linhas = caminho.read_text(encoding="utf-8").split("\n")
+
+    def _fim_colunas(self) -> int:
+        return next((i for i, l in enumerate(self.linhas) if FIM_DAS_COLUNAS.match(l)), len(self.linhas))
+
+    def colunas(self) -> list[str]:
+        return [l[3:].strip() for l in self.linhas[: self._fim_colunas()] if l.startswith("## ")]
+
+    def _bloco(self, i: int) -> int:
+        """Fim (exclusivo) do card que começa na linha i, incluindo linhas indentadas de continuação."""
+        j = i + 1
+        while j < len(self.linhas) and self.linhas[j][:1] in (" ", "\t") and self.linhas[j].strip():
+            j += 1
+        return j
+
+    def _posicao_no_fim(self, coluna: str) -> int:
+        fim_colunas = self._fim_colunas()
+        cab = next((i for i, l in enumerate(self.linhas[:fim_colunas])
+                    if l.startswith("## ") and l[3:].strip() == coluna), None)
+        if cab is None:
+            raise ValueError(f"coluna '{coluna}' não existe no quadro")
+        fim = next((i for i in range(cab + 1, fim_colunas) if self.linhas[i].startswith("## ")), fim_colunas)
+        cards = [i for i in range(cab + 1, fim) if self.linhas[i].startswith("- ")]
+        if cards:
+            return self._bloco(cards[-1])
+        return cab + 2 if cab + 1 < len(self.linhas) and not self.linhas[cab + 1].strip() else cab + 1
+
+    def novo_id(self) -> str:
+        usados = set(RE_ID.findall("\n".join(self.linhas)))
+        if self.arquivo.exists():
+            usados |= set(RE_ID.findall(self.arquivo.read_text(encoding="utf-8")))
+        livres = [str(n) for n in range(100, 1000) if str(n) not in usados]
+        if not livres:
+            raise ValueError("acabaram os IDs de 3 dígitos")
+        return random.choice(livres)
+
+    def adicionar(self, a: dict) -> dict:
+        summary = (a.get("summary") or "").strip()
+        if not summary:
+            raise ValueError("summary vazio")
+        coluna = a.get("coluna") or self.coluna_padrao
+        uid = self.novo_id()
+        partes = [f"- [ ] {summary}"]
+        if a.get("priority"):
+            partes.append(emoji_prioridade(int(a["priority"])))
+        if a.get("dtstart"):
+            partes.append(f"🛫 {dt.date.fromisoformat(a['dtstart']).isoformat()}")
+        if a.get("due"):
+            partes.append(f"📅 {dt.date.fromisoformat(a['due']).isoformat()}")
+        partes.append(f"🆔 {uid}")
+        card = " ".join(partes)
+        if chave(coluna) == chave(self.coluna_feito):
+            card = marcar_feito(card)
+        self.linhas.insert(self._posicao_no_fim(coluna), card)
+        return {"uid": uid, "resumo": f"{card[6:]}  →  {coluna}"}
+
+    def mover(self, a: dict) -> dict:
+        uid, coluna = str(a.get("uid") or ""), a.get("coluna") or ""
+        if not uid or not coluna:
+            raise ValueError("mover precisa de uid e coluna")
+        fim_colunas = self._fim_colunas()
+        inicio = next((n for n, l in enumerate(self.linhas[:fim_colunas])
+                       if l.startswith("- ") and (r := RE_ID.search(l)) and r.group(1) == uid), None)
+        if inicio is None:
+            raise ValueError(f"card 🆔 {uid} não encontrado no quadro")
+        self._posicao_no_fim(coluna)  # valida a coluna antes de mexer
+        bloco = self.linhas[inicio:self._bloco(inicio)]
+        del self.linhas[inicio:inicio + len(bloco)]
+        feito = chave(coluna) == chave(self.coluna_feito)
+        bloco[0] = marcar_feito(bloco[0]) if feito else desmarcar_feito(bloco[0])
+        pos = self._posicao_no_fim(coluna)
+        self.linhas[pos:pos] = bloco
+        return {"uid": uid, "resumo": f"{bloco[0][6:]}  →  {coluna}"}
+
+    def dar_ids(self) -> int:
+        n = 0
+        for i, l in enumerate(self.linhas[: self._fim_colunas()]):
+            if l.startswith("- ") and not RE_ID.search(l):
+                self.linhas[i] = f"{l.rstrip()} 🆔 {self.novo_id()}"
+                n += 1
+        return n
+
+    def salvar(self) -> None:
+        tmp = self.caminho.with_suffix(".md.tmp")
+        tmp.write_text("\n".join(self.linhas), encoding="utf-8")
+        tmp.replace(self.caminho)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--quadro", required=True, type=Path, help="caminho do Quadro.md (Arquivo.md fica ao lado)")
+    ap.add_argument("--coluna-padrao", default="A fazer")
+    ap.add_argument("--coluna-feito", default="Feito")
+    ap.add_argument("subcomando", choices=["colunas", "aplicar", "dar-ids"])
+    args = ap.parse_args()
+
+    try:
+        quadro = Quadro(args.quadro.expanduser(), args.coluna_padrao, args.coluna_feito)
+        if args.subcomando == "colunas":
+            print(json.dumps(quadro.colunas(), ensure_ascii=False))
+            return 0
+        if args.subcomando == "dar-ids":
+            n = quadro.dar_ids()
+            quadro.salvar()
+            print(json.dumps({"alterados": n}))
+            return 0
+
+        acao = json.loads(sys.stdin.read())
+        if acao.get("versao") != VERSAO_PROTOCOLO:
+            raise ValueError(f"versão de protocolo não suportada: {acao.get('versao')}")
+        if acao.get("acao") == "adicionar":
+            resposta = quadro.adicionar(acao)
+        elif acao.get("acao") == "mover":
+            resposta = quadro.mover(acao)
+        else:
+            raise ValueError(f"ação desconhecida: {acao.get('acao')}")
+        quadro.salvar()
+        print(json.dumps(resposta, ensure_ascii=False))
+        return 0
+    except Exception as e:
+        print(e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

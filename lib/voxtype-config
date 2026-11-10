@@ -1,0 +1,97 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["tomlkit>=0.12"]
+# ///
+"""Aplica ou desfaz as chaves do quadro-voz no config.toml do voxtype, preservando o resto.
+
+  voxtype-config aplicar <config.toml> <backup.json> <profiles.toml> <quadro-voz> [chave=valor ...]
+  voxtype-config restaurar <config.toml> <backup.json>
+
+Valores em chave=valor são TOML (true, 1, "pt"). O backup guarda o valor que cada chave e cada
+profile tinha antes da primeira vez que o quadro-voz mexeu nela; rodar de novo não perde esse estado.
+"""
+
+import json
+import sys
+from pathlib import Path
+
+import tomlkit
+
+AUSENTE = {"__ausente__": True}
+
+
+def pegar(doc, caminho: list[str]):
+    no = doc
+    for parte in caminho:
+        if not isinstance(no, dict) or parte not in no:
+            return AUSENTE
+        no = no[parte]
+    return no.unwrap() if hasattr(no, "unwrap") else no
+
+
+def definir(doc, caminho: list[str], valor) -> None:
+    no = doc
+    for parte in caminho[:-1]:
+        if parte not in no:
+            no[parte] = tomlkit.table()
+        no = no[parte]
+    no[caminho[-1]] = valor
+
+
+def remover(doc, caminho: list[str]) -> None:
+    no = doc
+    for parte in caminho[:-1]:
+        if parte not in no:
+            return
+        no = no[parte]
+    no.pop(caminho[-1], None)
+
+
+def aplicar(config: Path, backup: Path, profiles: Path, quadro_voz: str, pares: list[str]) -> None:
+    doc = tomlkit.parse(config.read_text(encoding="utf-8")) if config.exists() else tomlkit.document()
+    novos = {}
+    for par in pares:
+        chave, _, valor = par.partition("=")
+        novos[chave] = tomlkit.parse(f"v = {valor}").unwrap()["v"]
+    texto_profiles = profiles.read_text(encoding="utf-8").replace("@QUADRO_VOZ@", quadro_voz)
+    for nome, tabela in tomlkit.parse(texto_profiles)["profiles"].items():
+        novos[f"profiles.{nome}"] = tabela.unwrap()
+
+    # Só guarda chaves que ainda não estão no backup: o valor original nunca é sobrescrito.
+    anterior = json.loads(backup.read_text(encoding="utf-8")) if backup.exists() else {}
+    faltando = {c: pegar(doc, c.split(".")) for c in novos if c not in anterior}
+    if faltando or not backup.exists():
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_text(json.dumps(anterior | faltando, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    for c, valor in novos.items():
+        definir(doc, c.split("."), valor)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+
+def restaurar(config: Path, backup: Path) -> None:
+    if not backup.exists():
+        print(f"sem backup em {backup}; nada a restaurar", file=sys.stderr)
+        return
+    doc = tomlkit.parse(config.read_text(encoding="utf-8"))
+    for c, valor in json.loads(backup.read_text(encoding="utf-8")).items():
+        if valor == AUSENTE:
+            remover(doc, c.split("."))
+        else:
+            definir(doc, c.split("."), valor)
+    if "profiles" in doc and not doc["profiles"]:
+        del doc["profiles"]
+    # A remoção das tabelas deixa as linhas em branco que as separavam.
+    config.write_text(tomlkit.dumps(doc).rstrip("\n") + "\n", encoding="utf-8")
+    backup.unlink()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 6 and sys.argv[1] == "aplicar":
+        aplicar(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5], sys.argv[6:])
+    elif len(sys.argv) == 4 and sys.argv[1] == "restaurar":
+        restaurar(Path(sys.argv[2]), Path(sys.argv[3]))
+    else:
+        sys.exit(__doc__)

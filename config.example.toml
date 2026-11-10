@@ -1,0 +1,14 @@
+# ~/.config/quadro-voz/config.toml
+# O install.sh gera este arquivo. Edite à mão para trocar de destino ou de modelo.
+
+# Comando do destino (ver PROTOCOLO.md). Lista: executável seguido dos argumentos.
+destino = [
+  "~/.local/bin/quadro-voz-destino-obsidian",
+  "--quadro", "~/Obsidian/MeuVault/Quadro.md",
+]
+
+# Usado só pelo parser LLM (--parser llm). As variáveis QUADRO_OLLAMA e
+# QUADRO_OLLAMA_MODELO têm precedência sobre estes valores.
+[llm]
+url = "http://localhost:11434"
+modelo = "qwen3:8b"

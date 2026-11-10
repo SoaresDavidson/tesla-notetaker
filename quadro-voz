@@ -1,0 +1,339 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["dateparser>=1.2"]
+# ///
+"""Transforma uma frase falada numa ação de tarefa e entrega a um destino.
+
+Recebe o texto por --texto ou pelo stdin (o voxtype manda a transcrição pelo stdin).
+
+  Adicionar: "<nome> [prioridade X] [começo <data>] [fim <data>] [na coluna <coluna>]"
+  Mover:     "mover <uid> para <coluna>"
+
+Campo não falado fica em branco. O destino (configurado em ~/.config/quadro-voz/config.toml)
+é um executável que segue o PROTOCOLO.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import difflib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tomllib
+import unicodedata
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Protocol
+
+import dateparser
+
+VERSAO_PROTOCOLO = 1
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "quadro-voz/config.toml"
+
+# Prioridade falada -> PRIORITY do VTODO (RFC 5545: 1 = mais alta, 9 = mais baixa).
+PRIORIDADES = {"maxima": 1, "alta": 3, "media": 5, "baixa": 7, "minima": 9}
+SINONIMOS_PRIORIDADE = {"urgente": "maxima", "altissima": "maxima", "normal": "media", "baixissima": "minima"}
+
+
+def chave(s: str) -> str:
+    """Minúsculo e sem acento. Preserva o comprimento de texto NFC em português."""
+    return "".join(c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn")
+
+
+# ---------------------------------------------------------------- configuração
+
+@dataclass
+class Config:
+    destino: list[str]
+    llm_url: str
+    llm_modelo: str
+
+
+def ler_config() -> Config:
+    dados = tomllib.loads(CONFIG.read_text(encoding="utf-8")) if CONFIG.exists() else {}
+    destino = dados.get("destino")
+    if not destino:
+        raise SystemExit(f"destino não configurado em {CONFIG} (rode install.sh)")
+    if isinstance(destino, str):
+        destino = shlex.split(destino)
+    llm = dados.get("llm", {})
+    return Config(
+        destino=[os.path.expanduser(p) for p in destino],
+        llm_url=os.environ.get("QUADRO_OLLAMA", llm.get("url", "http://localhost:11434")),
+        llm_modelo=os.environ.get("QUADRO_OLLAMA_MODELO", llm.get("modelo", "qwen3:8b")),
+    )
+
+
+# ---------------------------------------------------------------- ações
+
+@dataclass
+class Adicionar:
+    summary: str
+    priority: int | None = None
+    dtstart: dt.date | None = None
+    due: dt.date | None = None
+    coluna: str | None = None
+    avisos: list[str] = field(default_factory=list)
+
+    def json(self) -> dict:
+        return {"versao": VERSAO_PROTOCOLO, "acao": "adicionar", "summary": self.summary,
+                "priority": self.priority,
+                "dtstart": self.dtstart.isoformat() if self.dtstart else None,
+                "due": self.due.isoformat() if self.due else None,
+                "coluna": self.coluna}
+
+
+@dataclass
+class Mover:
+    uid: str
+    coluna: str
+    avisos: list[str] = field(default_factory=list)
+
+    def json(self) -> dict:
+        return {"versao": VERSAO_PROTOCOLO, "acao": "mover", "uid": self.uid, "coluna": self.coluna}
+
+
+Acao = Adicionar | Mover
+
+
+class Parser(Protocol):
+    def interpretar(self, texto: str, colunas: list[str], hoje: dt.date) -> Acao: ...
+
+
+# ---------------------------------------------------------------- campos falados
+
+NUMEROS = {"um": "1", "uma": "1", "dois": "2", "duas": "2", "tres": "3", "quatro": "4", "cinco": "5",
+           "seis": "6", "sete": "7", "oito": "8", "nove": "9", "dez": "10"}
+# Reescritas para frases que o dateparser não entende em pt.
+REESCRITAS = [
+    (r"\bdepois de amanha\b", "em 2 dias"),
+    (r"\bdaqui a\b", "em"),
+    (r"\b(semana|mes|ano) que vem\b", r"em 1 \1"),
+    (r"\bproxim[ao] (semana|mes|ano)\b", r"em 1 \1"),
+    (r"\bproxim[ao]\s+", ""),
+    (r"\s+que vem\b", ""),
+    (r"\bdia (\d)", r"\1"),
+    (r"-feira\b", ""),
+]
+
+
+def data_falada(texto: str, hoje: dt.date) -> dt.date | None:
+    t = chave(texto).strip()
+    t = " ".join(NUMEROS.get(p, p) for p in t.split())
+    for padrao, troca in REESCRITAS:
+        t = re.sub(padrao, troca, t)
+    if not t:
+        return None
+    try:  # o LLM pode já ter devolvido ISO
+        return dt.date.fromisoformat(t)
+    except ValueError:
+        pass
+    base = dt.datetime.combine(hoje, dt.time())
+    d = dateparser.parse(t, languages=["pt"], settings={
+        "PREFER_DATES_FROM": "future", "RELATIVE_BASE": base, "DATE_ORDER": "DMY"})
+    return d.date() if d else None
+
+
+def coluna_falada(texto: str, colunas: list[str]) -> str | None:
+    alvo = chave(texto).strip()
+    alvo = re.sub(r"^(?:a|o|para|pra|pro|na|no|em|coluna)\s+", "", alvo)
+    alvo = re.sub(r"^(?:a|o|coluna)\s+", "", alvo)
+    por_chave = {chave(c): c for c in colunas}
+    achou = difflib.get_close_matches(alvo, por_chave, n=1, cutoff=0.6)
+    return por_chave[achou[0]] if achou else None
+
+
+def prioridade_falada(texto: str) -> int | None:
+    for palavra in chave(texto).split():
+        palavra = SINONIMOS_PRIORIDADE.get(palavra, palavra)
+        if palavra in PRIORIDADES:
+            return PRIORIDADES[palavra]
+    return None
+
+
+# ---------------------------------------------------------------- parsers
+
+class DateparserParser:
+    """Palavras-chave por regex; trechos de data vão para o dateparser."""
+
+    MOVER = re.compile(r"^(?:mover|mova|move|passar|passa|mude|mudar)\s+(?:a\s+|o\s+)?(?:tarefa\s+|card\s+)?"
+                       r"(?:numero\s+)?(\d+)\s+(?:para|pra|pro|em|na|no)\s+(.+)$")
+    CAMPOS = {
+        "priority": r"prioridade",
+        "dtstart": r"(?:data de )?(?:comeco|comeca|comecar|inicio|inicia|iniciar|a partir de)",
+        "due": r"(?:data de )?(?:fim|final|prazo|termina|terminar|termino|entrega|vence|vencimento"
+               r"|ate(?= (?:o |a )?(?:dia|amanha|depois|hoje|daqui|proxim|segunda|terca|quarta|quinta|sexta|sabado|domingo|\d)))",
+        "coluna": r"(?:na|em|para a|pra|para|no) coluna",
+    }
+    NOMES = {"priority": "prioridade", "dtstart": "começo", "due": "fim", "coluna": "coluna"}
+
+    def interpretar(self, texto: str, colunas: list[str], hoje: dt.date) -> Acao:
+        original = re.sub(r"\s+", " ", re.sub(r"[.,;:!?]", " ", unicodedata.normalize("NFC", texto))).strip()
+        k = chave(original)
+
+        if m := self.MOVER.match(k):
+            coluna = coluna_falada(m.group(2), colunas)
+            if not coluna:
+                return Mover(m.group(1), "", [f"coluna não encontrada: '{m.group(2)}'"])
+            return Mover(m.group(1), coluna)
+
+        achados = []
+        for campo, padrao in self.CAMPOS.items():
+            if m := re.search(rf"\b{padrao}\b", k):
+                achados.append((m.start(), m.end(), campo))
+        achados.sort()
+
+        nome = original[: achados[0][0] if achados else len(original)]
+        nome = re.sub(r"^(?:adicionar|adiciona|adicione|nova|novo|criar|cria|crie)\s+(?:a\s+)?(?:tarefa|card)?\s*",
+                      "", nome, flags=re.I)
+        nome = re.sub(r"\s+(?:e|com)\s*$", "", nome.strip(), flags=re.I).strip()
+        acao = Adicionar(nome)
+
+        for i, (_, fim, campo) in enumerate(achados):
+            limite = achados[i + 1][0] if i + 1 < len(achados) else len(k)
+            valor = re.sub(r"\s+(?:e|com|ate)\s*$", "", k[fim:limite].strip())
+            if campo == "priority":
+                acao.priority = prioridade_falada(valor)
+            elif campo == "coluna":
+                acao.coluna = coluna_falada(valor, colunas)
+            else:
+                setattr(acao, campo, data_falada(re.sub(r"^(?:em|no|na|para|pra|e)\s+", "", valor), hoje))
+            if getattr(acao, campo) is None:
+                acao.avisos.append(f"{self.NOMES[campo]} não entendido: '{valor}'")
+        return acao
+
+
+class OllamaParser:
+    """LLM local com saída em JSON schema. Datas e colunas passam pela mesma normalização."""
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {
+            "acao": {"type": "string", "enum": ["adicionar", "mover"]},
+            "nome": {"type": ["string", "null"]},
+            "prioridade": {"type": ["string", "null"], "enum": [*PRIORIDADES, None]},
+            "inicio": {"type": ["string", "null"]},
+            "fim": {"type": ["string", "null"]},
+            "coluna": {"type": ["string", "null"]},
+            "id": {"type": ["string", "null"]},
+        },
+        "required": ["acao", "nome", "prioridade", "inicio", "fim", "coluna", "id"],
+    }
+
+    def __init__(self, url: str, modelo: str):
+        self.url, self.modelo = url, modelo
+
+    def interpretar(self, texto: str, colunas: list[str], hoje: dt.date) -> Acao:
+        dias = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+        prompt = (
+            f"Hoje é {hoje.isoformat()} ({dias[hoje.weekday()]}). Colunas do quadro: {', '.join(colunas)}.\n"
+            "Converta a frase falada em JSON.\n"
+            "- acao 'mover' quando a frase pede para mover um card pelo número (id); senão 'adicionar'.\n"
+            "- nome: o nome completo da tarefa, com todas as palavras, tirando só prioridade, datas e coluna.\n"
+            "- inicio: trecho que diz quando começa (começo, início, a partir de), copiado como foi dito, ex. 'amanhã', 'segunda'; senão null.\n"
+            "- fim: trecho que diz o prazo (fim, prazo, até, entrega), copiado como foi dito, ex. 'sexta', 'dia 20'; senão null.\n"
+            "- prioridade: maxima (ou urgente), alta, media (ou normal), baixa ou minima, só se a frase disser; senão null.\n"
+            "- coluna: uma das colunas, só se a frase disser; senão null.\n"
+            f"Frase: {texto}"
+        )
+        # keep_alive 0: o modelo sai da VRAM logo após responder.
+        corpo = json.dumps({
+            "model": self.modelo, "prompt": prompt, "format": self.SCHEMA, "stream": False,
+            "think": False, "keep_alive": 0, "options": {"temperature": 0},
+        }).encode()
+        req = urllib.request.Request(f"{self.url}/api/generate", corpo, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            r = json.loads(json.loads(resp.read())["response"])
+
+        coluna = coluna_falada(r["coluna"], colunas) if r.get("coluna") else None
+        if r["acao"] == "mover":
+            if not (r.get("id") and coluna):
+                return Mover(r.get("id") or "", coluna or "", [f"mover incompleto: {r}"])
+            return Mover(re.sub(r"\D", "", r["id"]), coluna)
+        acao = Adicionar((r.get("nome") or "").strip(), coluna=coluna)
+        if r.get("prioridade"):
+            acao.priority = prioridade_falada(r["prioridade"])
+        for campo_llm, campo in (("inicio", "dtstart"), ("fim", "due")):
+            if r.get(campo_llm):
+                setattr(acao, campo, data_falada(r[campo_llm], hoje))
+                if getattr(acao, campo) is None:
+                    acao.avisos.append(f"{campo_llm} não entendido: '{r[campo_llm]}'")
+        return acao
+
+
+# ---------------------------------------------------------------- destino
+
+class ErroDestino(Exception):
+    pass
+
+
+def chamar_destino(destino: list[str], subcomando: str, entrada: dict | None = None):
+    proc = subprocess.run([*destino, subcomando], capture_output=True, text=True,
+                          input=json.dumps(entrada, ensure_ascii=False) if entrada is not None else None)
+    if proc.returncode != 0:
+        raise ErroDestino(proc.stderr.strip() or f"destino saiu com código {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+# ---------------------------------------------------------------- main
+
+def notificar(titulo: str, corpo: str = "") -> None:
+    subprocess.run(["notify-send", "-a", "Quadro", "-t", "7000", titulo, corpo], check=False)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--texto", help="frase a interpretar (padrão: stdin)")
+    ap.add_argument("--parser", choices=["dateparser", "llm"], default=os.environ.get("QUADRO_PARSER", "dateparser"))
+    ap.add_argument("--dry-run", action="store_true", help="imprime a ação JSON sem aplicar nem notificar")
+    ap.add_argument("--json", action="store_true", help="a entrada já é uma ação JSON; só repassa ao destino")
+    args = ap.parse_args()
+
+    config = ler_config()
+    texto = (args.texto if args.texto is not None else sys.stdin.read()).strip()
+    if not texto:
+        notificar("Quadro: não ouvi nada")
+        return 1
+
+    try:
+        if args.json:
+            acao_json, avisos = json.loads(texto), []
+        else:
+            colunas = chamar_destino(config.destino, "colunas")
+            parser = OllamaParser(config.llm_url, config.llm_modelo) if args.parser == "llm" else DateparserParser()
+            acao = parser.interpretar(texto, colunas, dt.date.today())
+            if isinstance(acao, Mover) and not acao.coluna:
+                raise ValueError("; ".join(acao.avisos))
+            if isinstance(acao, Adicionar) and not acao.summary:
+                raise ValueError("nome da tarefa vazio")
+            acao_json, avisos = acao.json(), acao.avisos
+
+        if args.dry_run:
+            print(json.dumps(acao_json, ensure_ascii=False))
+            for a in avisos:
+                print(f"aviso: {a}", file=sys.stderr)
+            return 0
+
+        resposta = chamar_destino(config.destino, "aplicar", acao_json)
+    except Exception as e:  # erro vira notificação: o atalho não tem terminal
+        if not args.dry_run:
+            notificar("Quadro: nada mudou", f"{e}\nOuvi: “{texto}”")
+        print(f"erro: {e}", file=sys.stderr)
+        return 1
+
+    resumo = resposta.get("resumo", resposta.get("uid", "ok"))
+    resumo += "\n⚠ " + "; ".join(avisos) if avisos else ""
+    print(resumo)
+    notificar("Card movido" if acao_json["acao"] == "mover" else "Tarefa adicionada", resumo)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
