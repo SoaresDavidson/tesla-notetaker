@@ -1,6 +1,6 @@
 # Protocolo miolo ↔ destino (versão 1)
 
-O `quadro-voz` (o miolo) entende a frase falada e produz uma ação. Um destino grava essa ação em algum lugar; ele pode ser qualquer executável, em qualquer linguagem, que responda aos subcomandos abaixo. Você escolhe o destino em `~/.config/quadro-voz/config.toml`:
+O `tesla` (o miolo) entende a frase falada e produz uma ação. Um destino grava essa ação em algum lugar; ele pode ser qualquer executável, em qualquer linguagem, que responda aos subcomandos abaixo. Você escolhe o destino em `~/.config/tesla/config.toml`:
 
 ```toml
 destino = ["/caminho/do/destino", "--opcao-do-destino", "valor"]
@@ -78,5 +78,5 @@ Toda ação leva `versao`. O destino deve recusar (código ≠ 0) uma versão qu
 destino colunas
 echo '{"versao":1,"acao":"adicionar","summary":"teste","priority":null,"dtstart":null,"due":null,"coluna":null}' \
   | destino aplicar
-quadro-voz --dry-run --texto "teste prioridade alta fim sexta"   # mostra a ação que seria enviada
+tesla --dry-run --texto "teste prioridade alta fim sexta"   # mostra a ação que seria enviada
 ```

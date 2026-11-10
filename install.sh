@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Instala o quadro-voz: script, destino Obsidian, profiles do voxtype e atalhos do Hyprland.
+# Instala o tesla: script, destino Obsidian, profiles do voxtype e atalhos do Hyprland.
 # Idempotente: rodar de novo só confirma o que já está instalado.
 #
 #   ./install.sh                 pergunta o que não souber (só na primeira vez)
@@ -11,9 +11,9 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 CFG=${XDG_CONFIG_HOME:-$HOME/.config}
 DADOS=${XDG_DATA_HOME:-$HOME/.local/share}
-ESTADO=${XDG_STATE_HOME:-$HOME/.local/state}/quadro-voz
+ESTADO=${XDG_STATE_HOME:-$HOME/.local/state}/tesla
 BIN=$HOME/.local/bin
-CONFIG=$CFG/quadro-voz/config.toml
+CONFIG=$CFG/tesla/config.toml
 RESPOSTAS=$ESTADO/instalacao.env
 MODELO_WHISPER=large-v3-turbo
 
@@ -118,7 +118,7 @@ if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
     mkdir -p "$(dirname "$CONFIG")"
     cat >"$CONFIG" <<EOF
 # Gerado por $REPO/install.sh. Ver config.example.toml.
-destino = ["$BIN/quadro-voz-destino-obsidian", "--quadro", "$quadro"]
+destino = ["$BIN/tesla-destino-obsidian", "--quadro", "$quadro"]
 
 [llm]
 url = "$llm_url"
@@ -144,10 +144,10 @@ fi
 # ------------------------------------------------------------------ 4. arquivos
 passo "Executáveis em $BIN"
 mkdir -p "$BIN"
-ln -sfn "$REPO/quadro-voz" "$BIN/quadro-voz"
-ln -sfn "$REPO/destinos/obsidian-kanban" "$BIN/quadro-voz-destino-obsidian"
-info "quadro-voz -> $REPO/quadro-voz"
-info "quadro-voz-destino-obsidian -> $REPO/destinos/obsidian-kanban"
+ln -sfn "$REPO/tesla" "$BIN/tesla"
+ln -sfn "$REPO/destinos/obsidian-kanban" "$BIN/tesla-destino-obsidian"
+info "tesla -> $REPO/tesla"
+info "tesla-destino-obsidian -> $REPO/destinos/obsidian-kanban"
 
 passo "voxtype ($CFG/voxtype/config.toml)"
 VCFG=$CFG/voxtype/config.toml
@@ -168,23 +168,23 @@ chaves=(
 )
 [[ -n ${GPU:-} ]] && chaves+=("whisper.gpu_device=$GPU")
 "$REPO/lib/voxtype-config" aplicar "$VCFG" "$ESTADO/voxtype-backup.json" \
-    "$REPO/voxtype-profiles.toml" "$BIN/quadro-voz" "${chaves[@]}"
-info "chaves e profiles quadro/quadro-llm aplicados (backup em $ESTADO/voxtype-backup.json)"
+    "$REPO/voxtype-profiles.toml" "$BIN/tesla" "${chaves[@]}"
+info "chaves e profiles tesla/tesla-llm aplicados (backup em $ESTADO/voxtype-backup.json)"
 
 passo "Atalhos do Hyprland"
 HDIR=$CFG/hypr
 if [[ -f $HDIR/hyprland.lua ]]; then
     if [[ -d $HDIR/config ]]; then
-        alvo=$HDIR/config/quadro-voz.lua req='require("config.quadro-voz")'
+        alvo=$HDIR/config/tesla.lua req='require("config.tesla")'
     else
-        alvo=$HDIR/quadro-voz.lua req='require("quadro-voz")'
+        alvo=$HDIR/tesla.lua req='require("tesla")'
     fi
-    ln -sfn "$REPO/hypr/quadro-voz.lua" "$alvo"
-    info "$alvo -> $REPO/hypr/quadro-voz.lua"
+    ln -sfn "$REPO/hypr/tesla.lua" "$alvo"
+    info "$alvo -> $REPO/hypr/tesla.lua"
     if grep -qxF "$req" "$HDIR/hyprland.lua"; then
         info "hyprland.lua já tem $req"
     else
-        printf '\n-- quadro-voz (install.sh)\n%s\n' "$req" >>"$HDIR/hyprland.lua"
+        printf '\n-- tesla (install.sh)\n%s\n' "$req" >>"$HDIR/hyprland.lua"
         info "acrescentado ao hyprland.lua: $req"
         [[ -L $HDIR/hyprland.lua ]] &&
             aviso "hyprland.lua é symlink para $(readlink -f "$HDIR/hyprland.lua"); a linha entrou lá"
@@ -192,9 +192,9 @@ if [[ -f $HDIR/hyprland.lua ]]; then
 elif [[ -f $HDIR/hyprland.conf ]]; then
     aviso "config clássica (hyprland.conf): cole isto nela"
     cat <<'EOF'
-        bind = SUPER SHIFT, T, exec, voxtype record start --profile quadro
+        bind = SUPER SHIFT, T, exec, voxtype record start --profile tesla
         bind = SUPER SHIFT, T, submap, voz
-        bind = SUPER SHIFT, Y, exec, voxtype record start --profile quadro-llm
+        bind = SUPER SHIFT, Y, exec, voxtype record start --profile tesla-llm
         bind = SUPER SHIFT, Y, submap, voz
         submap = voz
         bind = , Return, exec, voxtype record stop
@@ -225,10 +225,10 @@ fi
 if [[ $SIM == 0 && -n ${QUADRO:-} ]]; then
     passo "IDs nos cards"
     if sim_ou_nao "dar 🆔 aos cards que ainda não têm (permite movê-los por voz)?" n; then
-        "$BIN/quadro-voz-destino-obsidian" --quadro "$QUADRO" dar-ids
+        "$BIN/tesla-destino-obsidian" --quadro "$QUADRO" dar-ids
     fi
 fi
 
 passo "Pronto"
 info "SUPER+SHIFT+T: fale a tarefa, Enter para terminar, Esc para cancelar"
-info "teste sem voz: quadro-voz --dry-run --texto \"estudar redes prioridade alta fim sexta\""
+info "teste sem voz: tesla --dry-run --texto \"estudar redes prioridade alta fim sexta\""

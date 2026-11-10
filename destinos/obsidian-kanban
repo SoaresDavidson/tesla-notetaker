@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Destino do quadro-voz para um quadro do plugin Kanban do Obsidian (formato do plugin Tasks).
+"""Destino do tesla para um quadro do plugin Kanban do Obsidian (formato do plugin Tasks).
 
 Subcomandos (ver PROTOCOLO.md):
   colunas    imprime as colunas do quadro em JSON

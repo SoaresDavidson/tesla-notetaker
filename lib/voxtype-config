@@ -3,13 +3,13 @@
 # requires-python = ">=3.11"
 # dependencies = ["tomlkit>=0.12"]
 # ///
-"""Aplica ou desfaz as chaves do quadro-voz no config.toml do voxtype, preservando o resto.
+"""Aplica ou desfaz as chaves do tesla no config.toml do voxtype, preservando o resto.
 
-  voxtype-config aplicar <config.toml> <backup.json> <profiles.toml> <quadro-voz> [chave=valor ...]
+  voxtype-config aplicar <config.toml> <backup.json> <profiles.toml> <tesla> [chave=valor ...]
   voxtype-config restaurar <config.toml> <backup.json>
 
 Valores em chave=valor são TOML (true, 1, "pt"). O backup guarda o valor que cada chave e cada
-profile tinha antes da primeira vez que o quadro-voz mexeu nela; rodar de novo não perde esse estado.
+profile tinha antes da primeira vez que o tesla mexeu nela; rodar de novo não perde esse estado.
 """
 
 import json
@@ -54,7 +54,7 @@ def aplicar(config: Path, backup: Path, profiles: Path, quadro_voz: str, pares: 
     for par in pares:
         chave, _, valor = par.partition("=")
         novos[chave] = tomlkit.parse(f"v = {valor}").unwrap()["v"]
-    texto_profiles = profiles.read_text(encoding="utf-8").replace("@QUADRO_VOZ@", quadro_voz)
+    texto_profiles = profiles.read_text(encoding="utf-8").replace("@TESLA@", quadro_voz)
     for nome, tabela in tomlkit.parse(texto_profiles)["profiles"].items():
         novos[f"profiles.{nome}"] = tabela.unwrap()
 

@@ -1,4 +1,4 @@
--- quadro-voz: tarefa por voz (voxtype + quadro-voz).
+-- tesla: tarefas por voz no quadro (voxtype + tesla).
 -- SUPER+SHIFT+T (parser dateparser) ou SUPER+SHIFT+Y (parser LLM) começa a gravar e entra
 -- no submap "voz": Enter (ou o mesmo atalho) para e transcreve, Esc cancela.
 -- Fora da gravação o Enter funciona normalmente.
@@ -19,8 +19,8 @@ local function sairDaVoz(acao)
     end
 end
 
-hl.bind(mod .. " + SHIFT + T", gravarTarefa("quadro"))
-hl.bind(mod .. " + SHIFT + Y", gravarTarefa("quadro-llm"))
+hl.bind(mod .. " + SHIFT + T", gravarTarefa("tesla"))
+hl.bind(mod .. " + SHIFT + Y", gravarTarefa("tesla-llm"))
 
 hl.define_submap("voz", function()
     hl.bind("Return",              sairDaVoz("stop"))

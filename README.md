@@ -3,10 +3,10 @@
 Adiciona e move tarefas num quadro Kanban por voz. Você aperta um atalho, fala a tarefa e aperta Enter; o card aparece no quadro e uma notificação confirma.
 
 ```
-microfone → voxtype (Whisper, local) → quadro-voz (texto → ação JSON) → destino (Obsidian Kanban)
+microfone → voxtype (Whisper, local) → tesla (texto → ação JSON) → destino (Obsidian Kanban)
 ```
 
-O [voxtype](https://github.com/peteonrails/voxtype) grava e transcreve com o Whisper rodando na sua máquina. O `quadro-voz` separa nome, prioridade, começo, fim e coluna, com o `dateparser` ou com um LLM local via Ollama, e entrega uma ação JSON a um destino. O destino incluído grava num quadro do plugin Kanban do Obsidian, no formato do plugin Tasks. Para escrever outro destino, veja o [PROTOCOLO.md](PROTOCOLO.md).
+O [voxtype](https://github.com/peteonrails/voxtype) grava e transcreve com o Whisper rodando na sua máquina. O `tesla` separa nome, prioridade, começo, fim e coluna, com o `dateparser` ou com um LLM local via Ollama, e entrega uma ação JSON a um destino. O destino incluído grava num quadro do plugin Kanban do Obsidian, no formato do plugin Tasks. Para escrever outro destino, veja o [PROTOCOLO.md](PROTOCOLO.md).
 
 ## Como falar
 
@@ -67,11 +67,11 @@ O que ele altera no sistema:
 
 | Onde | O quê |
 |---|---|
-| `~/.local/bin/quadro-voz`, `~/.local/bin/quadro-voz-destino-obsidian` | symlinks para o repositório, então `git pull` atualiza |
-| `~/.config/quadro-voz/config.toml` | destino e LLM (ver `config.example.toml`) |
-| `~/.config/voxtype/config.toml` | só as chaves `hotkey.enabled`, `whisper.model/language/on_demand_loading/gpu_isolation/gpu_device` e `output.notification.*`, mais os profiles `quadro` e `quadro-llm`. Os valores anteriores ficam em `~/.local/state/quadro-voz/voxtype-backup.json` |
-| `~/.config/hypr/config/quadro-voz.lua` | symlink com os atalhos |
-| `~/.config/hypr/hyprland.lua` | uma linha `require("config.quadro-voz")` |
+| `~/.local/bin/tesla`, `~/.local/bin/tesla-destino-obsidian` | symlinks para o repositório, então `git pull` atualiza |
+| `~/.config/tesla/config.toml` | destino e LLM (ver `config.example.toml`) |
+| `~/.config/voxtype/config.toml` | só as chaves `hotkey.enabled`, `whisper.model/language/on_demand_loading/gpu_isolation/gpu_device` e `output.notification.*`, mais os profiles `tesla` e `tesla-llm`. Os valores anteriores ficam em `~/.local/state/tesla/voxtype-backup.json` |
+| `~/.config/hypr/config/tesla.lua` | symlink com os atalhos |
+| `~/.config/hypr/hyprland.lua` | uma linha `require("config.tesla")` |
 | systemd | `systemctl --user enable` e `restart voxtype` |
 | Hyprland | `hyprctl reload` |
 | `~/.local/share/voxtype/models` | o Whisper `large-v3-turbo` (1,6 GB), baixado se faltar |
@@ -86,21 +86,21 @@ Com `--sem-ativar` ele só mexe em arquivos: não baixa o modelo e não toca no 
 ./uninstall.sh
 ```
 
-O script remove os symlinks e a linha do `hyprland.lua` e devolve as chaves do voxtype aos valores anteriores. O config do quadro-voz, o modelo, o serviço voxtype e os 🆔 dos cards continuam no lugar.
+O script remove os symlinks e a linha do `hyprland.lua` e devolve as chaves do voxtype aos valores anteriores. O config do tesla, o modelo, o serviço voxtype e os 🆔 dos cards continuam no lugar.
 
 ## Configuração
 
-`~/.config/quadro-voz/config.toml`:
+`~/.config/tesla/config.toml`:
 
 ```toml
-destino = ["~/.local/bin/quadro-voz-destino-obsidian", "--quadro", "~/Obsidian/MeuVault/Quadro.md"]
+destino = ["~/.local/bin/tesla-destino-obsidian", "--quadro", "~/Obsidian/MeuVault/Quadro.md"]
 
 [llm]
 url = "http://localhost:11434"
 modelo = "qwen3:8b"
 ```
 
-As variáveis `QUADRO_OLLAMA` e `QUADRO_OLLAMA_MODELO` sobrepõem a seção `[llm]`. O destino Obsidian aceita também `--coluna-padrao` (padrão "A fazer") e `--coluna-feito` (padrão "Feito").
+As variáveis `TESLA_OLLAMA` e `TESLA_OLLAMA_MODELO` sobrepõem a seção `[llm]`. O destino Obsidian aceita também `--coluna-padrao` (padrão "A fazer") e `--coluna-feito` (padrão "Feito").
 
 ## GPU
 
@@ -109,9 +109,9 @@ Com `whisper.gpu_isolation` e `on_demand_loading`, o voxtype carrega o Whisper a
 ## Testar sem voz
 
 ```bash
-quadro-voz --dry-run --texto "estudar redes prioridade alta fim sexta"     # mostra a ação JSON
-quadro-voz --dry-run --parser llm --texto "..."                            # o mesmo, com o LLM
-echo "comprar café" | quadro-voz                                           # aplica no quadro
+tesla --dry-run --texto "estudar redes prioridade alta fim sexta"     # mostra a ação JSON
+tesla --dry-run --parser llm --texto "..."                            # o mesmo, com o LLM
+echo "comprar café" | tesla                                           # aplica no quadro
 ```
 
 ## Problemas
@@ -120,4 +120,4 @@ Se nada acontece ao falar, veja `journalctl --user -u voxtype -n 30`.
 
 A mensagem "destino não configurado" significa que falta rodar o `./install.sh`.
 
-Se o texto foi para o clipboard e o card não apareceu, o voxtype não conseguiu rodar o `quadro-voz` (estourou o tempo ou deu erro) e copiou só a transcrição. Teste com `echo "<frase>" | quadro-voz`.
+Se o texto foi para o clipboard e o card não apareceu, o voxtype não conseguiu rodar o `tesla` (estourou o tempo ou deu erro) e copiou só a transcrição. Teste com `echo "<frase>" | tesla`.

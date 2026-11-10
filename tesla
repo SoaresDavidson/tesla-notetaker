@@ -10,7 +10,7 @@ Recebe o texto por --texto ou pelo stdin (o voxtype manda a transcrição pelo s
   Adicionar: "<nome> [prioridade X] [começo <data>] [fim <data>] [na coluna <coluna>]"
   Mover:     "mover <uid> para <coluna>"
 
-Campo não falado fica em branco. O destino (configurado em ~/.config/quadro-voz/config.toml)
+Campo não falado fica em branco. O destino (configurado em ~/.config/tesla/config.toml)
 é um executável que segue o PROTOCOLO.md.
 """
 
@@ -35,7 +35,7 @@ from typing import Protocol
 import dateparser
 
 VERSAO_PROTOCOLO = 1
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "quadro-voz/config.toml"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "tesla/config.toml"
 
 # Prioridade falada -> PRIORITY do VTODO (RFC 5545: 1 = mais alta, 9 = mais baixa).
 PRIORIDADES = {"maxima": 1, "alta": 3, "media": 5, "baixa": 7, "minima": 9}
@@ -66,8 +66,8 @@ def ler_config() -> Config:
     llm = dados.get("llm", {})
     return Config(
         destino=[os.path.expanduser(p) for p in destino],
-        llm_url=os.environ.get("QUADRO_OLLAMA", llm.get("url", "http://localhost:11434")),
-        llm_modelo=os.environ.get("QUADRO_OLLAMA_MODELO", llm.get("modelo", "qwen3:8b")),
+        llm_url=os.environ.get("TESLA_OLLAMA", llm.get("url", "http://localhost:11434")),
+        llm_modelo=os.environ.get("TESLA_OLLAMA_MODELO", llm.get("modelo", "qwen3:8b")),
     )
 
 
@@ -291,7 +291,7 @@ def notificar(titulo: str, corpo: str = "") -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--texto", help="frase a interpretar (padrão: stdin)")
-    ap.add_argument("--parser", choices=["dateparser", "llm"], default=os.environ.get("QUADRO_PARSER", "dateparser"))
+    ap.add_argument("--parser", choices=["dateparser", "llm"], default=os.environ.get("TESLA_PARSER", "dateparser"))
     ap.add_argument("--dry-run", action="store_true", help="imprime a ação JSON sem aplicar nem notificar")
     ap.add_argument("--json", action="store_true", help="a entrada já é uma ação JSON; só repassa ao destino")
     args = ap.parse_args()

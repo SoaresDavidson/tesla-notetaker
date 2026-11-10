@@ -8,7 +8,7 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 CFG=${XDG_CONFIG_HOME:-$HOME/.config}
-ESTADO=${XDG_STATE_HOME:-$HOME/.local/state}/quadro-voz
+ESTADO=${XDG_STATE_HOME:-$HOME/.local/state}/tesla
 BIN=$HOME/.local/bin
 ATIVAR=1
 for arg in "$@"; do
@@ -29,24 +29,24 @@ remover_link() {
     fi
 }
 
-remover_link "$BIN/quadro-voz"
-remover_link "$BIN/quadro-voz-destino-obsidian"
+remover_link "$BIN/tesla"
+remover_link "$BIN/tesla-destino-obsidian"
 
 HDIR=$CFG/hypr
-for alvo in "$HDIR/config/quadro-voz.lua" "$HDIR/quadro-voz.lua"; do remover_link "$alvo"; done
-if [[ -f $HDIR/hyprland.lua ]] && grep -q 'quadro-voz' "$HDIR/hyprland.lua"; then
+for alvo in "$HDIR/config/tesla.lua" "$HDIR/tesla.lua"; do remover_link "$alvo"; done
+if [[ -f $HDIR/hyprland.lua ]] && grep -q 'tesla' "$HDIR/hyprland.lua"; then
     # --follow-symlinks: o hyprland.lua pode ser symlink para um repositório de dotfiles.
     sed -i --follow-symlinks \
-        -e '/^-- quadro-voz (install.sh)$/d' \
-        -e '/^require("\(config\.\)\{0,1\}quadro-voz")$/d' "$HDIR/hyprland.lua"
+        -e '/^-- tesla (install.sh)$/d' \
+        -e '/^require("\(config\.\)\{0,1\}tesla")$/d' "$HDIR/hyprland.lua"
     # Remove a linha em branco que o install.sh deixou no fim, se sobrou.
     sed -i --follow-symlinks -e '${/^$/d}' "$HDIR/hyprland.lua"
-    info "require do quadro-voz removido de hyprland.lua"
+    info "require do tesla removido de hyprland.lua"
 fi
 
 if [[ -f $ESTADO/voxtype-backup.json ]]; then
     "$REPO/lib/voxtype-config" restaurar "$CFG/voxtype/config.toml" "$ESTADO/voxtype-backup.json"
-    info "voxtype: chaves restauradas e profiles quadro/quadro-llm removidos"
+    info "voxtype: chaves restauradas e profiles tesla/tesla-llm removidos"
 fi
 rm -f -- "$ESTADO/instalacao.env"
 rmdir -- "$ESTADO" 2>/dev/null || true
@@ -58,7 +58,7 @@ fi
 
 echo
 info "Ficaram (apague à mão se quiser):"
-info "  $CFG/quadro-voz/config.toml"
+info "  $CFG/tesla/config.toml"
 info "  o serviço voxtype (systemctl --user disable --now voxtype) e o pacote voxtype-bin"
 info "  o modelo do Whisper em ${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models"
 info "  os 🆔 nos cards do quadro"

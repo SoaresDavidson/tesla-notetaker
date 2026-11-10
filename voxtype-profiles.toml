@@ -1,13 +1,13 @@
 # Profiles que o install.sh acrescenta ao ~/.config/voxtype/config.toml.
-# @QUADRO_VOZ@ é trocado pelo caminho absoluto do quadro-voz instalado.
+# @TESLA@ é trocado pelo caminho absoluto do tesla instalado.
 # output_mode = "clipboard": o resultado vai para o clipboard e nada é digitado na janela em foco.
 
-[profiles.quadro]
-post_process_command = "@QUADRO_VOZ@"
+[profiles.tesla]
+post_process_command = "@TESLA@"
 post_process_timeout_ms = 30000
 output_mode = "clipboard"
 
-[profiles.quadro-llm]
-post_process_command = "@QUADRO_VOZ@ --parser llm"
+[profiles.tesla-llm]
+post_process_command = "@TESLA@ --parser llm"
 post_process_timeout_ms = 120000
 output_mode = "clipboard"
