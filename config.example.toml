@@ -7,6 +7,13 @@ destino = [
   "--quadro", "~/Obsidian/MeuVault/Quadro.md",
 ]
 
+# Ou um GitHub Project: issues em --repo, adicionadas ao project número --projeto.
+# destino = [
+#   "~/.local/bin/tesla-destino-github",
+#   "--repo", "seu-usuario/tarefas",
+#   "--projeto", "8",
+# ]
+
 # Usado só pelo parser LLM (--parser llm). As variáveis TESLA_OLLAMA e
 # TESLA_OLLAMA_MODELO têm precedência sobre estes valores.
 [llm]

@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Destino do tesla para um GitHub Project (v2). Cada tarefa vira uma issue num repositório.
+
+Subcomandos (ver PROTOCOLO.md):
+  colunas    imprime as opções do campo Status do project em JSON
+  aplicar    lê uma ação JSON do stdin e aplica no project
+
+O uid é o número da issue ("mover 14 para feito"). Usa o `gh` já autenticado,
+com o escopo `project` (gh auth refresh -s project).
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import subprocess
+import sys
+import unicodedata
+
+VERSAO_PROTOCOLO = 1
+
+# PRIORITY do VTODO -> nomes aceitos para a opção do campo de prioridade, em ordem de preferência.
+NOMES_PRIORIDADE = {
+    1: ["urgente", "maxima", "alta", "p0"],
+    3: ["alta", "p0"],
+    5: ["media", "normal", "p1"],
+    7: ["baixa", "p2"],
+    9: ["minima", "baixa", "p2"],
+}
+
+
+def chave(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn")
+
+
+def graphql(query: str, **variaveis) -> dict:
+    corpo = json.dumps({"query": query, "variables": variaveis})
+    proc = subprocess.run(["gh", "api", "graphql", "--input", "-"], input=corpo,
+                          capture_output=True, text=True, timeout=30)
+    resposta = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    if proc.returncode != 0 or resposta.get("errors"):
+        erros = resposta.get("errors") or [{"message": proc.stderr.strip() or f"gh saiu com {proc.returncode}"}]
+        raise RuntimeError("GitHub: " + "; ".join(e["message"] for e in erros))
+    return resposta["data"]
+
+
+CAMPOS = """
+  fields(first: 50) {
+    nodes {
+      ... on ProjectV2FieldCommon { id name dataType }
+      ... on ProjectV2SingleSelectField { options { id name } }
+    }
+  }
+"""
+
+
+class Projeto:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        dono, self.repo_nome = args.repo.split("/", 1)
+        d = graphql(f"""
+            query($dono: String!, $repo: String!, $numero: Int!) {{
+              repositoryOwner(login: $dono) {{
+                ... on User {{ projectV2(number: $numero) {{ id {CAMPOS} }} }}
+                ... on Organization {{ projectV2(number: $numero) {{ id {CAMPOS} }} }}
+              }}
+              repository(owner: $dono, name: $repo) {{ id }}
+            }}""", dono=args.dono or dono, repo=self.repo_nome, numero=args.projeto)
+        projeto = (d["repositoryOwner"] or {}).get("projectV2")
+        if not projeto:
+            raise ValueError(f"project {args.projeto} não encontrado em {args.dono or dono}")
+        if not d["repository"]:
+            raise ValueError(f"repositório {args.repo} não encontrado")
+        self.dono, self.id, self.repo_id = dono, projeto["id"], d["repository"]["id"]
+        self.campos = {chave(c["name"]): c for c in projeto["fields"]["nodes"] if c}
+
+    def campo(self, nome: str) -> dict | None:
+        return self.campos.get(chave(nome))
+
+    def colunas(self) -> list[str]:
+        status = self.campo(self.args.campo_status)
+        if not status or "options" not in status:
+            raise ValueError(f"o project não tem o campo de seleção '{self.args.campo_status}'")
+        return [o["name"] for o in status["options"]]
+
+    def _opcao(self, campo: dict, nome: str) -> dict:
+        opcao = next((o for o in campo["options"] if chave(o["name"]) == chave(nome)), None)
+        if not opcao:
+            raise ValueError(f"'{nome}' não é opção de {campo['name']}")
+        return opcao
+
+    def _prioridade(self, p: int) -> tuple[dict, dict] | None:
+        campo = self.campo(self.args.campo_prioridade)
+        if not campo or "options" not in campo:
+            return None
+        nomes = NOMES_PRIORIDADE[min(NOMES_PRIORIDADE, key=lambda k: abs(k - p))]
+        for nome in nomes:
+            for o in campo["options"]:
+                if chave(o["name"]) == nome:
+                    return campo, o
+        return None
+
+    def _atualizar(self, item: str, valores: dict[str, tuple[dict, dict]]) -> None:
+        """Grava vários campos do item numa só mutation. valores: alias -> (campo, value)."""
+        if not valores:
+            return
+        partes = [
+            f"""{alias}: updateProjectV2ItemFieldValue(input: {{projectId: $projeto, itemId: $item,
+                  fieldId: {json.dumps(campo["id"])}, value: {{{chave_valor}: {json.dumps(valor)}}}}}) {{ clientMutationId }}"""
+            for alias, (campo, (chave_valor, valor)) in valores.items()
+        ]
+        graphql(f"mutation($projeto: ID!, $item: ID!) {{ {' '.join(partes)} }}", projeto=self.id, item=item)
+
+    def _estado_issue(self, issue: str, fechar: bool) -> None:
+        if fechar:
+            graphql("mutation($id: ID!) { closeIssue(input: {issueId: $id, stateReason: COMPLETED}) { clientMutationId } }",
+                    id=issue)
+        else:
+            graphql("mutation($id: ID!) { reopenIssue(input: {issueId: $id}) { clientMutationId } }", id=issue)
+
+    def adicionar(self, a: dict) -> dict:
+        summary = (a.get("summary") or "").strip()
+        if not summary:
+            raise ValueError("summary vazio")
+        status = self.campo(self.args.campo_status)
+        opcao = self._opcao(status, a.get("coluna") or self.args.coluna_padrao)
+        coluna = opcao["name"]
+        valores = {"status": (status, ("singleSelectOptionId", opcao["id"]))}
+        extras, avisos = [], []
+
+        if a.get("priority"):
+            achou = self._prioridade(int(a["priority"]))
+            if achou:
+                valores["prioridade"] = (achou[0], ("singleSelectOptionId", achou[1]["id"]))
+                extras.append(achou[1]["name"])
+            else:
+                avisos.append("prioridade ignorada")
+        for chave_acao, nome_campo, rotulo in (("dtstart", self.args.campo_inicio, "início"),
+                                               ("due", self.args.campo_prazo, "prazo")):
+            if a.get(chave_acao):
+                data = dt.date.fromisoformat(a[chave_acao]).isoformat()
+                campo = self.campo(nome_campo)
+                if campo:
+                    valores[chave_acao] = (campo, ("date", data))
+                    extras.append(f"{rotulo} {data}")
+                else:
+                    avisos.append(f"{rotulo} ignorado (falta o campo '{nome_campo}')")
+
+        d = graphql("""
+            mutation($repo: ID!, $titulo: String!, $projeto: ID!) {
+              createIssue(input: {repositoryId: $repo, title: $titulo, projectV2Ids: [$projeto]}) {
+                issue { id number projectItems(first: 20) { nodes { id project { id } } } }
+              }
+            }""", repo=self.repo_id, titulo=summary, projeto=self.id)
+        issue = d["createIssue"]["issue"]
+        item = next((n["id"] for n in issue["projectItems"]["nodes"] if n["project"]["id"] == self.id), None)
+        if not item:
+            item = graphql("""
+                mutation($projeto: ID!, $issue: ID!) {
+                  addProjectV2ItemById(input: {projectId: $projeto, contentId: $issue}) { item { id } }
+                }""", projeto=self.id, issue=issue["id"])["addProjectV2ItemById"]["item"]["id"]
+        self._atualizar(item, valores)
+        if chave(coluna) == chave(self.args.coluna_feito):
+            self._estado_issue(issue["id"], fechar=True)
+
+        uid = str(issue["number"])
+        resumo = " · ".join([f"#{uid} {summary}", *extras]) + f"  →  {coluna}"
+        if avisos:
+            resumo += f" ({'; '.join(avisos)})"
+        return {"uid": uid, "resumo": resumo}
+
+    def mover(self, a: dict) -> dict:
+        uid, coluna = str(a.get("uid") or "").lstrip("#"), a.get("coluna") or ""
+        if not uid.isdigit() or not coluna:
+            raise ValueError("mover precisa de uid numérico e coluna")
+        status = self.campo(self.args.campo_status)
+        opcao = self._opcao(status, coluna)
+        coluna = opcao["name"]
+        d = graphql("""
+            query($dono: String!, $repo: String!, $numero: Int!) {
+              repository(owner: $dono, name: $repo) {
+                issue(number: $numero) { id title state projectItems(first: 20) { nodes { id project { id } } } }
+              }
+            }""", dono=self.dono, repo=self.repo_nome, numero=int(uid))
+        issue = d["repository"]["issue"]
+        if not issue:
+            raise ValueError(f"issue #{uid} não existe em {self.args.repo}")
+        item = next((n["id"] for n in issue["projectItems"]["nodes"] if n["project"]["id"] == self.id), None)
+        if not item:
+            raise ValueError(f"issue #{uid} não está no project {self.args.projeto}")
+        self._atualizar(item, {"status": (status, ("singleSelectOptionId", opcao["id"]))})
+        feito = chave(coluna) == chave(self.args.coluna_feito)
+        if feito != (issue["state"] == "CLOSED"):
+            self._estado_issue(issue["id"], fechar=feito)
+        return {"uid": uid, "resumo": f"#{uid} {issue['title']}  →  {coluna}"}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--repo", required=True, help="dono/nome do repositório onde as issues são criadas")
+    ap.add_argument("--projeto", required=True, type=int, help="número do project (gh project list)")
+    ap.add_argument("--dono", help="dono do project, se diferente do dono do repositório")
+    ap.add_argument("--coluna-padrao", default="A fazer")
+    ap.add_argument("--coluna-feito", default="Feito")
+    ap.add_argument("--campo-status", default="Status")
+    ap.add_argument("--campo-prioridade", default="Priority")
+    ap.add_argument("--campo-inicio", default="Start date")
+    ap.add_argument("--campo-prazo", default="Target date")
+    ap.add_argument("subcomando", choices=["colunas", "aplicar"])
+    args = ap.parse_args()
+
+    try:
+        projeto = Projeto(args)
+        if args.subcomando == "colunas":
+            print(json.dumps(projeto.colunas(), ensure_ascii=False))
+            return 0
+        acao = json.loads(sys.stdin.read())
+        if acao.get("versao") != VERSAO_PROTOCOLO:
+            raise ValueError(f"versão de protocolo não suportada: {acao.get('versao')}")
+        if acao.get("acao") == "adicionar":
+            resposta = projeto.adicionar(acao)
+        elif acao.get("acao") == "mover":
+            resposta = projeto.mover(acao)
+        else:
+            raise ValueError(f"ação desconhecida: {acao.get('acao')}")
+        print(json.dumps(resposta, ensure_ascii=False))
+        return 0
+    except Exception as e:
+        print(e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

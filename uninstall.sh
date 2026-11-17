@@ -31,6 +31,7 @@ remover_link() {
 
 remover_link "$BIN/tesla"
 remover_link "$BIN/tesla-destino-obsidian"
+remover_link "$BIN/tesla-destino-github"
 
 HDIR=$CFG/hypr
 for alvo in "$HDIR/config/tesla.lua" "$HDIR/tesla.lua"; do remover_link "$alvo"; done

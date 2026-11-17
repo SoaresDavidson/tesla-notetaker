@@ -30,7 +30,7 @@ Lê uma única ação JSON do stdin e aplica. Em sucesso, sai com código 0 e im
 
 `resumo` é o texto que aparece na notificação. Em erro, sai com código diferente de 0 e escreve a mensagem no stderr. O miolo mostra essa mensagem na notificação.
 
-Subcomandos extras são livres. O destino Obsidian tem `dar-ids`, por exemplo.
+Subcomandos extras são livres. O destino Obsidian tem `dar-ids`, por exemplo. O destino GitHub Projects usa o número da issue como `uid`.
 
 ## Ações
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Instala o tesla: script, destino Obsidian, profiles do voxtype e atalhos do Hyprland.
+# Instala o tesla: script, destinos (Obsidian ou GitHub Projects), profiles do voxtype e atalhos do Hyprland.
 # Idempotente: rodar de novo só confirma o que já está instalado.
 #
 #   ./install.sh                 pergunta o que não souber (só na primeira vez)
@@ -75,7 +75,24 @@ encontrar_quadros() {  # imprime arquivos .md de quadros Kanban dentro de vaults
 }
 
 if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
-    passo "Destino: quadro Kanban do Obsidian"
+    passo "Destino"
+    info "[1] quadro Kanban do Obsidian"
+    info "[2] GitHub Projects (cada tarefa vira uma issue)"
+    tipo_destino=$(pergunta "destino" 1)
+fi
+
+if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]] && [[ $tipo_destino == 2 ]]; then
+    command -v gh >/dev/null || { aviso "instale o gh (sudo pacman -S github-cli)"; exit 1; }
+    gh auth status 2>&1 | grep -q "'project'" ||
+        { aviso "o token do gh não tem o escopo project; rode: gh auth refresh -s project"; exit 1; }
+    gh project list --owner @me 2>/dev/null | awk -F'\t' '{print "    [" $1 "] " $2}'
+    projeto=$(pergunta "número do project" "")
+    repo=$(pergunta "repositório das issues (dono/nome)" "$(gh api user -q .login)/tarefas")
+    "$REPO/destinos/github-projects" --repo "$repo" --projeto "$projeto" colunas >/dev/null ||
+        { aviso "não consegui ler o project $projeto com o repositório $repo"; exit 1; }
+    linha_destino="destino = [\"$BIN/tesla-destino-github\", \"--repo\", \"$repo\", \"--projeto\", \"$projeto\"]"
+    QUADRO=""
+elif [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
     mapfile -t quadros < <(encontrar_quadros)
     padrao=${quadros[0]:-}
     if ((${#quadros[@]})); then
@@ -88,7 +105,11 @@ if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
     fi
     quadro=${quadro/#\~/$HOME}
     [[ -f $quadro ]] || { aviso "arquivo não existe: $quadro"; exit 1; }
+    linha_destino="destino = [\"$BIN/tesla-destino-obsidian\", \"--quadro\", \"$quadro\"]"
+    QUADRO=$quadro
+fi
 
+if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
     passo "LLM (só para o atalho SUPER+SHIFT+Y)"
     llm_url=$(pergunta "URL do Ollama" "http://localhost:11434")
     llm_modelo=$(pergunta "modelo" "qwen3:8b")
@@ -118,13 +139,13 @@ if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
     mkdir -p "$(dirname "$CONFIG")"
     cat >"$CONFIG" <<EOF
 # Gerado por $REPO/install.sh. Ver config.example.toml.
-destino = ["$BIN/tesla-destino-obsidian", "--quadro", "$quadro"]
+$linha_destino
 
 [llm]
 url = "$llm_url"
 modelo = "$llm_modelo"
 EOF
-    printf 'GPU=%q\nQUADRO=%q\n' "$GPU" "$quadro" >"$RESPOSTAS"
+    printf 'GPU=%q\nQUADRO=%q\n' "$GPU" "$QUADRO" >"$RESPOSTAS"
     info "gravado: $CONFIG"
 else
     passo "Configuração"
@@ -146,8 +167,10 @@ passo "Executáveis em $BIN"
 mkdir -p "$BIN"
 ln -sfn "$REPO/tesla" "$BIN/tesla"
 ln -sfn "$REPO/destinos/obsidian-kanban" "$BIN/tesla-destino-obsidian"
+ln -sfn "$REPO/destinos/github-projects" "$BIN/tesla-destino-github"
 info "tesla -> $REPO/tesla"
 info "tesla-destino-obsidian -> $REPO/destinos/obsidian-kanban"
+info "tesla-destino-github -> $REPO/destinos/github-projects"
 
 passo "voxtype ($CFG/voxtype/config.toml)"
 VCFG=$CFG/voxtype/config.toml
