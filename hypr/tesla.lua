@@ -4,28 +4,29 @@
 -- Fora da gravação o Enter funciona normalmente.
 
 local mod = "SUPER"
+local voz = os.getenv("HOME") .. "/.local/bin/tesla-voz"
 
-local function gravarTarefa(perfil)
+local function gravarTarefa(parser)
     return function()
-        hl.exec_cmd("voxtype record start --profile " .. perfil)
+        hl.exec_cmd(voz .. " iniciar " .. parser)
         hl.dispatch(hl.dsp.submap("voz"))
     end
 end
 
 local function sairDaVoz(acao)
     return function()
-        hl.exec_cmd("voxtype record " .. acao)
+        hl.exec_cmd(voz .. " " .. acao)
         hl.dispatch(hl.dsp.submap("reset"))
     end
 end
 
-hl.bind(mod .. " + SHIFT + T", gravarTarefa("tesla"))
-hl.bind(mod .. " + SHIFT + Y", gravarTarefa("tesla-llm"))
+hl.bind(mod .. " + SHIFT + T", gravarTarefa("dateparser"))
+hl.bind(mod .. " + SHIFT + Y", gravarTarefa("llm"))
 
 hl.define_submap("voz", function()
-    hl.bind("Return",              sairDaVoz("stop"))
-    hl.bind("KP_Enter",            sairDaVoz("stop"))
-    hl.bind(mod .. " + SHIFT + T", sairDaVoz("stop"))
-    hl.bind(mod .. " + SHIFT + Y", sairDaVoz("stop"))
-    hl.bind("Escape",              sairDaVoz("cancel"))
+    hl.bind("Return",              sairDaVoz("parar"))
+    hl.bind("KP_Enter",            sairDaVoz("parar"))
+    hl.bind(mod .. " + SHIFT + T", sairDaVoz("parar"))
+    hl.bind(mod .. " + SHIFT + Y", sairDaVoz("parar"))
+    hl.bind("Escape",              sairDaVoz("cancelar"))
 end)

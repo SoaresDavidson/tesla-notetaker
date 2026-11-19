@@ -14,6 +14,13 @@ destino = [
 #   "--projeto", "8",
 # ]
 
+# Ou um quadro do Trello: --quadro é o trecho depois de /b/ na URL do quadro.
+# Chave e token em ~/.config/tesla/trello.json ({"key": "...", "token": "..."}).
+# destino = [
+#   "~/.local/bin/tesla-destino-trello",
+#   "--quadro", "AbCd1234",
+# ]
+
 # Usado só pelo parser LLM (--parser llm). As variáveis TESLA_OLLAMA e
 # TESLA_OLLAMA_MODELO têm precedência sobre estes valores.
 [llm]

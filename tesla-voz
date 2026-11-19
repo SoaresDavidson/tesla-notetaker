@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Grava pelo voxtype e entrega a transcrição ao tesla. Os atalhos do Hyprland chamam este script.
+#
+#   tesla-voz iniciar [dateparser|llm]   começa a gravar
+#   tesla-voz parar                      para, espera a transcrição e roda o tesla
+#   tesla-voz cancelar                   descarta a gravação
+#
+# O voxtype grava a transcrição num arquivo (--file) em vez de digitar. Os profiles do
+# voxtype 1.2 não servem aqui: o daemon apaga o profile_override ao começar a gravar e,
+# na hora de transcrever, digita o texto na janela em foco com o SUPER ainda apertado.
+set -euo pipefail
+
+DIR=${XDG_RUNTIME_DIR:-/tmp}/tesla
+FALA=$DIR/fala.txt
+PARSER=$DIR/parser
+TESLA=$(dirname "$(readlink -f "$0")")/tesla
+
+case ${1:-} in
+    iniciar)
+        mkdir -p "$DIR"
+        rm -f "$FALA"
+        echo "${2:-dateparser}" >"$PARSER"
+        exec voxtype record start --file="$FALA"
+        ;;
+    cancelar)
+        rm -f "$FALA"
+        exec voxtype record cancel
+        ;;
+    parar)
+        voxtype record stop
+        # O voxtype volta a idle depois de gravar o arquivo. 150 s cobre carregar o Whisper.
+        for _ in $(seq 1500); do
+            [[ $(voxtype status 2>/dev/null) == idle ]] && break
+            sleep 0.1
+        done
+        texto=$(cat "$FALA" 2>/dev/null || true)
+        rm -f "$FALA"
+        exec "$TESLA" --parser "$(cat "$PARSER" 2>/dev/null || echo dateparser)" <<<"$texto"
+        ;;
+    *)
+        sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//' >&2
+        exit 2
+        ;;
+esac

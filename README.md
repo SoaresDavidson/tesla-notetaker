@@ -1,12 +1,12 @@
 # tesla-notetaker
 
-Adiciona e move tarefas num quadro Kanban por voz, no Obsidian ou num GitHub Project. Você aperta um atalho, fala a tarefa e aperta Enter; o card aparece no quadro e uma notificação confirma.
+Adiciona e move tarefas num quadro Kanban por voz, no Obsidian, num GitHub Project ou no Trello. Você aperta um atalho, fala a tarefa e aperta Enter; o card aparece no quadro e uma notificação confirma.
 
 ```
-microfone → voxtype (Whisper, local) → tesla (texto → ação JSON) → destino (Obsidian Kanban ou GitHub Projects)
+microfone → voxtype (Whisper, local) → tesla (texto → ação JSON) → destino (Obsidian Kanban, GitHub Projects ou Trello)
 ```
 
-O [voxtype](https://github.com/peteonrails/voxtype) grava e transcreve com o Whisper rodando na sua máquina. O `tesla` separa nome, prioridade, começo, fim e coluna, com o `dateparser` ou com um LLM local via Ollama, e entrega uma ação JSON a um destino. Há dois destinos incluídos: um grava num quadro do plugin Kanban do Obsidian, no formato do plugin Tasks; o outro cria issues num repositório e as coloca num GitHub Project. Para escrever outro destino, veja o [PROTOCOLO.md](PROTOCOLO.md).
+O [voxtype](https://github.com/peteonrails/voxtype) grava e transcreve com o Whisper rodando na sua máquina. O `tesla` separa nome, prioridade, começo, fim e coluna, com o `dateparser` ou com um LLM local via Ollama, e entrega uma ação JSON a um destino. Há três destinos incluídos: um grava num quadro do plugin Kanban do Obsidian, no formato do plugin Tasks; outro cria issues num repositório e as coloca num GitHub Project; o terceiro cria cards num quadro do Trello. Para escrever outro destino, veja o [PROTOCOLO.md](PROTOCOLO.md).
 
 ## Como falar
 
@@ -62,15 +62,16 @@ cd tesla-notetaker
 ./install.sh
 ```
 
-Na primeira execução o instalador pergunta o destino. No Obsidian, ele procura vaults com quadros Kanban e pergunta qual usar; no GitHub, ele lista seus projects e pergunta o número do project e o repositório onde criar as issues. Depois pergunta a URL e o modelo do Ollama, e em qual GPU rodar o Whisper, sugerindo a dedicada. Nas execuções seguintes ele reaproveita as respostas; `--reconfigurar` pergunta de novo e `--yes` aceita os padrões.
+Na primeira execução o instalador pergunta o destino. No Obsidian, ele procura vaults com quadros Kanban e pergunta qual usar; no GitHub, ele lista seus projects e pergunta o número do project e o repositório onde criar as issues. No Trello, ele pede a chave e o token da API (o token não aparece na tela), grava os dois em `~/.config/tesla/trello.json` e pergunta qual quadro usar. Depois pergunta a URL e o modelo do Ollama, e em qual GPU rodar o Whisper, sugerindo a dedicada. Nas execuções seguintes ele reaproveita as respostas; `--reconfigurar` pergunta de novo e `--yes` aceita os padrões.
 
 O que ele altera no sistema:
 
 | Onde | O quê |
 |---|---|
-| `~/.local/bin/tesla`, `~/.local/bin/tesla-destino-obsidian`, `~/.local/bin/tesla-destino-github` | symlinks para o repositório, então `git pull` atualiza |
+| `~/.local/bin/tesla`, `~/.local/bin/tesla-voz`, `~/.local/bin/tesla-destino-obsidian`, `~/.local/bin/tesla-destino-github`, `~/.local/bin/tesla-destino-trello` | symlinks para o repositório, então `git pull` atualiza |
 | `~/.config/tesla/config.toml` | destino e LLM (ver `config.example.toml`) |
-| `~/.config/voxtype/config.toml` | só as chaves `hotkey.enabled`, `whisper.model/language/on_demand_loading/gpu_isolation/gpu_device` e `output.notification.*`, mais os profiles `tesla` e `tesla-llm`. Os valores anteriores ficam em `~/.local/state/tesla/voxtype-backup.json` |
+| `~/.config/tesla/trello.json` | chave e token do Trello, com permissão 600, se você escolher esse destino |
+| `~/.config/voxtype/config.toml` | só as chaves `hotkey.enabled`, `whisper.model/language/on_demand_loading/gpu_isolation/gpu_device` e `output.notification.*`. Os valores anteriores ficam em `~/.local/state/tesla/voxtype-backup.json` |
 | `~/.config/hypr/config/tesla.lua` | symlink com os atalhos |
 | `~/.config/hypr/hyprland.lua` | uma linha `require("config.tesla")` |
 | systemd | `systemctl --user enable` e `restart voxtype` |
@@ -121,6 +122,22 @@ Mover para "Feito" fecha a issue como concluída; tirar de "Feito" reabre. Os no
 
 Cada comando faz de 3 a 5 chamadas à API do GitHub, então a notificação demora um ou dois segundos a mais que no Obsidian.
 
+### Trello
+
+```toml
+destino = ["~/.local/bin/tesla-destino-trello", "--quadro", "AbCd1234"]
+```
+
+`--quadro` é o trecho depois de `/b/` na URL do quadro; `tesla-destino-trello quadros` lista os seus. As colunas são as listas abertas do quadro e o número do card é o número curto que o Trello mostra (`#12`). A chave e o token da API ficam em `~/.config/tesla/trello.json`, no formato `{"key": "...", "token": "..."}`; as variáveis `TRELLO_API_KEY` e `TRELLO_TOKEN` têm precedência. Gere os dois em https://trello.com/power-ups/admin, na aba "Autenticação do Trello" da sua Power-Up.
+
+| Fala | No card |
+|---|---|
+| prioridade | a etiqueta com o nome do nível (Alta, Média, Baixa...), com ou sem o prefixo `Prioridade:`. Sem etiqueta correspondente, a prioridade é ignorada e a notificação avisa |
+| começo | data de início |
+| fim | data de entrega |
+
+Mover para "Feito" marca a data de entrega como concluída; tirar de "Feito" desmarca.
+
 ## GPU
 
 Com `whisper.gpu_isolation` e `on_demand_loading`, o voxtype carrega o Whisper a cada gravação e libera a VRAM no fim. O parser LLM pede `keep_alive: 0` ao Ollama, que tira o modelo da VRAM assim que responde. Assim o Whisper e um modelo de 8B cabem numa GPU de 8 GB, e cada tarefa leva alguns segundos a mais para carregar. Se preferir resposta rápida, desligue `gpu_isolation` no config do voxtype.
@@ -139,4 +156,4 @@ Se nada acontece ao falar, veja `journalctl --user -u voxtype -n 30`.
 
 A mensagem "destino não configurado" significa que falta rodar o `./install.sh`.
 
-Se o texto foi para o clipboard e o card não apareceu, o voxtype não conseguiu rodar o `tesla` (estourou o tempo ou deu erro) e copiou só a transcrição. Teste com `echo "<frase>" | tesla`.
+Os atalhos chamam o `tesla-voz`, que grava com `voxtype record start --file`, espera a transcrição e passa o texto ao `tesla`. O texto nunca é digitado na janela em foco. Para testar o resto da cadeia sem o microfone, rode `echo "<frase>" | tesla`.

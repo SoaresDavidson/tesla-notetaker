@@ -30,8 +30,10 @@ remover_link() {
 }
 
 remover_link "$BIN/tesla"
+remover_link "$BIN/tesla-voz"
 remover_link "$BIN/tesla-destino-obsidian"
 remover_link "$BIN/tesla-destino-github"
+remover_link "$BIN/tesla-destino-trello"
 
 HDIR=$CFG/hypr
 for alvo in "$HDIR/config/tesla.lua" "$HDIR/tesla.lua"; do remover_link "$alvo"; done
@@ -47,7 +49,7 @@ fi
 
 if [[ -f $ESTADO/voxtype-backup.json ]]; then
     "$REPO/lib/voxtype-config" restaurar "$CFG/voxtype/config.toml" "$ESTADO/voxtype-backup.json"
-    info "voxtype: chaves restauradas e profiles tesla/tesla-llm removidos"
+    info "voxtype: chaves restauradas"
 fi
 rm -f -- "$ESTADO/instalacao.env"
 rmdir -- "$ESTADO" 2>/dev/null || true
@@ -60,6 +62,7 @@ fi
 echo
 info "Ficaram (apague à mão se quiser):"
 info "  $CFG/tesla/config.toml"
+[[ -f $CFG/tesla/trello.json ]] && info "  $CFG/tesla/trello.json (chave e token do Trello)"
 info "  o serviço voxtype (systemctl --user disable --now voxtype) e o pacote voxtype-bin"
 info "  o modelo do Whisper em ${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models"
 info "  os 🆔 nos cards do quadro"

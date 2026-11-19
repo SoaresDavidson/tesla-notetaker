@@ -5,11 +5,11 @@
 # ///
 """Aplica ou desfaz as chaves do tesla no config.toml do voxtype, preservando o resto.
 
-  voxtype-config aplicar <config.toml> <backup.json> <profiles.toml> <tesla> [chave=valor ...]
+  voxtype-config aplicar <config.toml> <backup.json> [chave=valor ...]
   voxtype-config restaurar <config.toml> <backup.json>
 
-Valores em chave=valor são TOML (true, 1, "pt"). O backup guarda o valor que cada chave e cada
-profile tinha antes da primeira vez que o tesla mexeu nela; rodar de novo não perde esse estado.
+Valores em chave=valor são TOML (true, 1, "pt"). O backup guarda o valor que cada chave tinha
+antes da primeira vez que o tesla mexeu nela; rodar de novo não perde esse estado.
 """
 
 import json
@@ -48,15 +48,12 @@ def remover(doc, caminho: list[str]) -> None:
     no.pop(caminho[-1], None)
 
 
-def aplicar(config: Path, backup: Path, profiles: Path, quadro_voz: str, pares: list[str]) -> None:
+def aplicar(config: Path, backup: Path, pares: list[str]) -> None:
     doc = tomlkit.parse(config.read_text(encoding="utf-8")) if config.exists() else tomlkit.document()
     novos = {}
     for par in pares:
         chave, _, valor = par.partition("=")
         novos[chave] = tomlkit.parse(f"v = {valor}").unwrap()["v"]
-    texto_profiles = profiles.read_text(encoding="utf-8").replace("@TESLA@", quadro_voz)
-    for nome, tabela in tomlkit.parse(texto_profiles)["profiles"].items():
-        novos[f"profiles.{nome}"] = tabela.unwrap()
 
     # Só guarda chaves que ainda não estão no backup: o valor original nunca é sobrescrito.
     anterior = json.loads(backup.read_text(encoding="utf-8")) if backup.exists() else {}
@@ -89,8 +86,8 @@ def restaurar(config: Path, backup: Path) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 6 and sys.argv[1] == "aplicar":
-        aplicar(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5], sys.argv[6:])
+    if len(sys.argv) >= 4 and sys.argv[1] == "aplicar":
+        aplicar(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4:])
     elif len(sys.argv) == 4 and sys.argv[1] == "restaurar":
         restaurar(Path(sys.argv[2]), Path(sys.argv[3]))
     else:

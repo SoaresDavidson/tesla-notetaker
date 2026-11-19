@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Instala o tesla: script, destinos (Obsidian ou GitHub Projects), profiles do voxtype e atalhos do Hyprland.
+# Instala o tesla: script, destinos (Obsidian, GitHub Projects ou Trello), chaves do voxtype e atalhos do Hyprland.
 # Idempotente: rodar de novo só confirma o que já está instalado.
 #
 #   ./install.sh                 pergunta o que não souber (só na primeira vez)
@@ -40,6 +40,13 @@ pergunta() {
     echo "${resposta:-$2}"
 }
 
+pergunta_secreta() {  # pergunta_secreta "texto" -> resposta no stdout, sem eco no terminal
+    local resposta
+    read -r -s -p "    $1: " resposta </dev/tty
+    echo >/dev/tty
+    echo "$resposta"
+}
+
 sim_ou_nao() {  # sim_ou_nao "texto" s|n
     local r
     r=$(pergunta "$1 (s/n)" "$2")
@@ -78,6 +85,7 @@ if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
     passo "Destino"
     info "[1] quadro Kanban do Obsidian"
     info "[2] GitHub Projects (cada tarefa vira uma issue)"
+    info "[3] Trello (cada tarefa vira um card)"
     tipo_destino=$(pergunta "destino" 1)
 fi
 
@@ -91,6 +99,31 @@ if [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]] && [[ $tipo_destino == 2 ]]; then
     "$REPO/destinos/github-projects" --repo "$repo" --projeto "$projeto" colunas >/dev/null ||
         { aviso "não consegui ler o project $projeto com o repositório $repo"; exit 1; }
     linha_destino="destino = [\"$BIN/tesla-destino-github\", \"--repo\", \"$repo\", \"--projeto\", \"$projeto\"]"
+    QUADRO=""
+elif [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]] && [[ $tipo_destino == 3 ]]; then
+    CRED=$CFG/tesla/trello.json
+    if [[ -f $CRED ]]; then
+        info "usando as credenciais de $CRED"
+    elif [[ -n ${TRELLO_API_KEY:-} && -n ${TRELLO_TOKEN:-} ]] || [[ $SIM == 0 ]]; then
+        info "chave e token em https://trello.com/power-ups/admin (aba Autenticação do Trello)"
+        key=${TRELLO_API_KEY:-$(pergunta "chave da API" "")}
+        token=${TRELLO_TOKEN:-$(pergunta_secreta "token")}
+        [[ -n $key && -n $token ]] || { aviso "chave e token são obrigatórios"; exit 1; }
+        mkdir -p "$(dirname "$CRED")"
+        (umask 077; python3 -c 'import json, sys; print(json.dumps({"key": sys.argv[1], "token": sys.argv[2]}))' \
+            "$key" "$token" >"$CRED")
+        info "gravado: $CRED (só você lê)"
+    else
+        aviso "sem credenciais: defina TRELLO_API_KEY e TRELLO_TOKEN ou rode sem --yes"; exit 1
+    fi
+    lista=$(env -u TRELLO_API_KEY -u TRELLO_TOKEN "$REPO/destinos/trello" quadros) ||
+        { aviso "o Trello recusou as credenciais de $CRED"; exit 1; }
+    mapfile -t quadros <<<"$lista"
+    for q in "${quadros[@]}"; do info "[${q%%$'\t'*}] ${q#*$'\t'}"; done
+    quadro=$(pergunta "id do quadro" "${quadros[0]%%$'\t'*}")
+    env -u TRELLO_API_KEY -u TRELLO_TOKEN "$REPO/destinos/trello" --quadro "$quadro" colunas >/dev/null ||
+        { aviso "não consegui ler o quadro $quadro"; exit 1; }
+    linha_destino="destino = [\"$BIN/tesla-destino-trello\", \"--quadro\", \"$quadro\"]"
     QUADRO=""
 elif [[ ! -f $CONFIG || $RECONFIGURAR == 1 ]]; then
     mapfile -t quadros < <(encontrar_quadros)
@@ -166,11 +199,15 @@ fi
 passo "Executáveis em $BIN"
 mkdir -p "$BIN"
 ln -sfn "$REPO/tesla" "$BIN/tesla"
+ln -sfn "$REPO/tesla-voz" "$BIN/tesla-voz"
 ln -sfn "$REPO/destinos/obsidian-kanban" "$BIN/tesla-destino-obsidian"
 ln -sfn "$REPO/destinos/github-projects" "$BIN/tesla-destino-github"
+ln -sfn "$REPO/destinos/trello" "$BIN/tesla-destino-trello"
 info "tesla -> $REPO/tesla"
+info "tesla-voz -> $REPO/tesla-voz"
 info "tesla-destino-obsidian -> $REPO/destinos/obsidian-kanban"
 info "tesla-destino-github -> $REPO/destinos/github-projects"
+info "tesla-destino-trello -> $REPO/destinos/trello"
 
 passo "voxtype ($CFG/voxtype/config.toml)"
 VCFG=$CFG/voxtype/config.toml
@@ -190,9 +227,8 @@ chaves=(
     'output.notification.on_transcription=false'
 )
 [[ -n ${GPU:-} ]] && chaves+=("whisper.gpu_device=$GPU")
-"$REPO/lib/voxtype-config" aplicar "$VCFG" "$ESTADO/voxtype-backup.json" \
-    "$REPO/voxtype-profiles.toml" "$BIN/tesla" "${chaves[@]}"
-info "chaves e profiles tesla/tesla-llm aplicados (backup em $ESTADO/voxtype-backup.json)"
+"$REPO/lib/voxtype-config" aplicar "$VCFG" "$ESTADO/voxtype-backup.json" "${chaves[@]}"
+info "chaves aplicadas (backup em $ESTADO/voxtype-backup.json)"
 
 passo "Atalhos do Hyprland"
 HDIR=$CFG/hypr
@@ -215,14 +251,14 @@ if [[ -f $HDIR/hyprland.lua ]]; then
 elif [[ -f $HDIR/hyprland.conf ]]; then
     aviso "config clássica (hyprland.conf): cole isto nela"
     cat <<'EOF'
-        bind = SUPER SHIFT, T, exec, voxtype record start --profile tesla
+        bind = SUPER SHIFT, T, exec, ~/.local/bin/tesla-voz iniciar dateparser
         bind = SUPER SHIFT, T, submap, voz
-        bind = SUPER SHIFT, Y, exec, voxtype record start --profile tesla-llm
+        bind = SUPER SHIFT, Y, exec, ~/.local/bin/tesla-voz iniciar llm
         bind = SUPER SHIFT, Y, submap, voz
         submap = voz
-        bind = , Return, exec, voxtype record stop
+        bind = , Return, exec, ~/.local/bin/tesla-voz parar
         bind = , Return, submap, reset
-        bind = , Escape, exec, voxtype record cancel
+        bind = , Escape, exec, ~/.local/bin/tesla-voz cancelar
         bind = , Escape, submap, reset
         submap = reset
 EOF

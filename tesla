@@ -141,6 +141,16 @@ def data_falada(texto: str, hoje: dt.date) -> dt.date | None:
     return d.date() if d else None
 
 
+def limpar_nome(nome: str) -> str:
+    """Tira o verbo de comando do começo ("anotar, estudar...") e conectivos que sobram no fim
+    ("estudar redes de [prioridade alta]")."""
+    # "criar" também começa tarefa ("criar backup"): só sai com "tarefa" ou "card" depois.
+    nome = re.sub(r"^(?:(?:adicionar|adiciona|adicione|anotar|anota|anote)\b[\s,:]*"
+                  r"|(?:nova|novo|criar|cria|crie)\s+(?=(?:a\s+)?(?:tarefa|card)\b))"
+                  r"(?:a\s+)?(?:(?:tarefa|card)\b[\s,:]*)?", "", nome.strip(), flags=re.I)
+    return re.sub(r"(?:\s+(?:e|com|de|da|do|na|no|em|para|pra))+\s*$", "", nome.strip(), flags=re.I).strip()
+
+
 def coluna_falada(texto: str, colunas: list[str]) -> str | None:
     alvo = chave(texto).strip()
     alvo = re.sub(r"^(?:a|o|para|pra|pro|na|no|em|coluna)\s+", "", alvo)
@@ -191,10 +201,7 @@ class DateparserParser:
         achados.sort()
 
         nome = original[: achados[0][0] if achados else len(original)]
-        nome = re.sub(r"^(?:adicionar|adiciona|adicione|nova|novo|criar|cria|crie)\s+(?:a\s+)?(?:tarefa|card)?\s*",
-                      "", nome, flags=re.I)
-        nome = re.sub(r"\s+(?:e|com)\s*$", "", nome.strip(), flags=re.I).strip()
-        acao = Adicionar(nome)
+        acao = Adicionar(limpar_nome(nome))
 
         for i, (_, fim, campo) in enumerate(achados):
             limite = achados[i + 1][0] if i + 1 < len(achados) else len(k)
@@ -211,36 +218,44 @@ class DateparserParser:
 
 
 class OllamaParser:
-    """LLM local com saída em JSON schema. Datas e colunas passam pela mesma normalização."""
+    """LLM local com saída em JSON schema. Datas e colunas passam pela mesma normalização.
+
+    "mover <uid> para <coluna>" tem forma fixa e fica com a regex do DateparserParser:
+    o LLM só extrai os campos de uma tarefa nova. Deixar o LLM escolher a ação fazia
+    um modelo de 8B classificar frases comuns como "mover" e inventar um id.
+    """
 
     SCHEMA = {
         "type": "object",
         "properties": {
-            "acao": {"type": "string", "enum": ["adicionar", "mover"]},
             "nome": {"type": ["string", "null"]},
             "prioridade": {"type": ["string", "null"], "enum": [*PRIORIDADES, None]},
             "inicio": {"type": ["string", "null"]},
             "fim": {"type": ["string", "null"]},
             "coluna": {"type": ["string", "null"]},
-            "id": {"type": ["string", "null"]},
         },
-        "required": ["acao", "nome", "prioridade", "inicio", "fim", "coluna", "id"],
+        "required": ["nome", "prioridade", "inicio", "fim", "coluna"],
     }
 
     def __init__(self, url: str, modelo: str):
         self.url, self.modelo = url, modelo
 
     def interpretar(self, texto: str, colunas: list[str], hoje: dt.date) -> Acao:
+        regex = DateparserParser()
+        if regex.MOVER.match(chave(re.sub(r"[.,;:!?]", " ", texto)).strip()):
+            return regex.interpretar(texto, colunas, hoje)
         dias = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
         prompt = (
             f"Hoje é {hoje.isoformat()} ({dias[hoje.weekday()]}). Colunas do quadro: {', '.join(colunas)}.\n"
-            "Converta a frase falada em JSON.\n"
-            "- acao 'mover' quando a frase pede para mover um card pelo número (id); senão 'adicionar'.\n"
+            "Converta a frase falada, que descreve uma tarefa nova, em JSON.\n"
             "- nome: o nome completo da tarefa, com todas as palavras, tirando só prioridade, datas e coluna.\n"
-            "- inicio: trecho que diz quando começa (começo, início, a partir de), copiado como foi dito, ex. 'amanhã', 'segunda'; senão null.\n"
-            "- fim: trecho que diz o prazo (fim, prazo, até, entrega), copiado como foi dito, ex. 'sexta', 'dia 20'; senão null.\n"
+            "- inicio: só a data que vem depois de 'começo', 'início' ou 'a partir de', copiada como foi dita; senão null.\n"
+            "- fim: só a data que vem depois de 'fim', 'prazo', 'até', 'entrega' ou 'vence', copiada como foi dita; senão null.\n"
+            "  Uma data depois de 'prazo' vai sempre em fim, nunca em inicio.\n"
             "- prioridade: maxima (ou urgente), alta, media (ou normal), baixa ou minima, só se a frase disser; senão null.\n"
             "- coluna: uma das colunas, só se a frase disser; senão null.\n"
+            "Exemplo: 'estudar prova de rede prioridade alta prazo amanhã' -> nome 'estudar prova de rede', "
+            "prioridade 'alta', inicio null, fim 'amanhã', coluna null.\n"
             f"Frase: {texto}"
         )
         # keep_alive 0: o modelo sai da VRAM logo após responder.
@@ -253,13 +268,11 @@ class OllamaParser:
             r = json.loads(json.loads(resp.read())["response"])
 
         coluna = coluna_falada(r["coluna"], colunas) if r.get("coluna") else None
-        if r["acao"] == "mover":
-            if not (r.get("id") and coluna):
-                return Mover(r.get("id") or "", coluna or "", [f"mover incompleto: {r}"])
-            return Mover(re.sub(r"\D", "", r["id"]), coluna)
-        acao = Adicionar((r.get("nome") or "").strip(), coluna=coluna)
-        if r.get("prioridade"):
-            acao.priority = prioridade_falada(r["prioridade"])
+        acao = Adicionar(limpar_nome(r.get("nome") or ""), coluna=coluna)
+        # A palavra dita depois de "prioridade" vale mais que a escolha do LLM ("urgente" virava alta).
+        falada = re.search(r"\bprioridade\s+(\w+)", chave(texto))
+        acao.priority = (falada and prioridade_falada(falada.group(1))) or (
+            prioridade_falada(r["prioridade"]) if r.get("prioridade") else None)
         for campo_llm, campo in (("inicio", "dtstart"), ("fim", "due")):
             if r.get(campo_llm):
                 setattr(acao, campo, data_falada(r[campo_llm], hoje))

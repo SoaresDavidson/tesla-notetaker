@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Destino do tesla para um quadro do Trello. Cada tarefa vira um card.
+
+Subcomandos (ver PROTOCOLO.md):
+  colunas    imprime as listas abertas do quadro em JSON
+  aplicar    lê uma ação JSON do stdin e aplica no quadro
+  quadros    imprime os quadros abertos da conta (id curto e nome), um por linha
+
+O uid é o número curto do card no quadro ("mover 12 para feito"). A prioridade vira a
+etiqueta com o nome do nível (Alta, Média, Baixa...), com ou sem o prefixo "Prioridade:".
+A chave e o token da API vêm de TRELLO_API_KEY e TRELLO_TOKEN ou, se elas não
+existirem, do arquivo de credenciais (padrão ~/.config/tesla/trello.json):
+  {"key": "...", "token": "..."}
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from functools import cached_property
+from pathlib import Path
+
+from protocolo import Destino, chave, executar, nomes_prioridade
+
+API = "https://api.trello.com/1/"
+
+
+def chave_etiqueta(nome: str) -> str:
+    k = chave(nome)
+    for prefixo in ("prioridade:", "priority:"):
+        if k.startswith(prefixo):
+            return k[len(prefixo):].strip()
+    return k
+
+
+def credenciais(caminho: str) -> tuple[str, str]:
+    key, token = os.environ.get("TRELLO_API_KEY"), os.environ.get("TRELLO_TOKEN")
+    if key and token:
+        return key, token
+    arquivo = Path(caminho).expanduser()
+    try:
+        dados = json.loads(arquivo.read_text())
+        return dados["key"], dados["token"]
+    except FileNotFoundError:
+        raise ValueError(f"sem credenciais do Trello: defina TRELLO_API_KEY e TRELLO_TOKEN ou crie {arquivo}") from None
+    except (KeyError, json.JSONDecodeError):
+        raise ValueError(f"{arquivo} precisa ser JSON com os campos key e token") from None
+
+
+class Trello(Destino):
+    extras = {"quadros": "quadros"}
+
+    @classmethod
+    def argumentos(cls, ap: argparse.ArgumentParser) -> None:
+        ap.add_argument("--quadro", help="id ou id curto do quadro (o trecho depois de /b/ na URL)")
+        ap.add_argument("--credenciais",
+                        default=str(Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")) / "tesla/trello.json"))
+
+    def __init__(self, args: argparse.Namespace):
+        super().__init__(args)
+        self.auth = dict(zip(("key", "token"), credenciais(args.credenciais)))
+
+    def _api(self, metodo: str, caminho: str, **params) -> object:
+        consulta = urllib.parse.urlencode({**self.auth, **params})
+        url, corpo = API + caminho, None
+        if metodo == "GET":
+            url += "?" + consulta
+        else:
+            corpo = consulta.encode()
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=corpo, method=metodo), timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            detalhe = e.read().decode(errors="replace").strip()[:200]
+            raise RuntimeError(f"Trello: {metodo} {caminho}: {e.code} {detalhe}") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Trello: sem conexão ({e.reason})") from None
+
+    @cached_property
+    def _quadro(self) -> dict:
+        if not self.args.quadro:
+            raise ValueError("falta --quadro")
+        return self._api("GET", f"boards/{self.args.quadro}", fields="id,name",
+                         lists="open", list_fields="name", labels="all", label_fields="name")
+
+    def _lista(self, nome: str) -> dict:
+        lista = next((l for l in self._quadro["lists"] if chave(l["name"]) == chave(nome)), None)
+        if not lista:
+            raise ValueError(f"'{nome}' não é lista do quadro")
+        return lista
+
+    def _etiqueta_prioridade(self, p: int) -> dict | None:
+        for nome in nomes_prioridade(p):
+            for e in self._quadro["labels"]:
+                if e.get("name") and chave_etiqueta(e["name"]) == nome:
+                    return e
+        return None
+
+    def quadros(self) -> None:
+        for q in self._api("GET", "members/me/boards", filter="open", fields="name,shortLink"):
+            print(f"{q['shortLink']}\t{q['name']}")
+
+    def colunas(self) -> list[str]:
+        return [l["name"] for l in self._quadro["lists"]]
+
+    def adicionar(self, a: dict) -> dict:
+        summary = (a.get("summary") or "").strip()
+        if not summary:
+            raise ValueError("summary vazio")
+        lista = self._lista(a.get("coluna") or self.args.coluna_padrao)
+        params = {"idList": lista["id"], "name": summary, "pos": "bottom"}
+        extras, avisos = [], []
+
+        if a.get("priority"):
+            etiqueta = self._etiqueta_prioridade(int(a["priority"]))
+            if etiqueta:
+                params["idLabels"] = etiqueta["id"]
+                extras.append(etiqueta["name"])
+            else:
+                avisos.append("prioridade ignorada (falta a etiqueta)")
+        if a.get("dtstart"):
+            inicio = dt.date.fromisoformat(a["dtstart"]).isoformat()
+            params["start"] = inicio
+            extras.append(f"início {inicio}")
+        if a.get("due"):
+            prazo = dt.date.fromisoformat(a["due"]).isoformat()
+            # Meio-dia UTC cai no mesmo dia em qualquer fuso do Brasil.
+            params["due"] = f"{prazo}T12:00:00.000Z"
+            params["dueComplete"] = str(self.e_feito(lista["name"])).lower()
+            extras.append(f"prazo {prazo}")
+
+        card = self._api("POST", "cards", **params)
+        uid = str(card["idShort"])
+        resumo = " · ".join([f"#{uid} {summary}", *extras]) + f"  →  {lista['name']}"
+        if avisos:
+            resumo += f" ({'; '.join(avisos)})"
+        return {"uid": uid, "resumo": resumo}
+
+    def mover(self, a: dict) -> dict:
+        uid, coluna = str(a.get("uid") or "").lstrip("#"), a.get("coluna") or ""
+        if not uid.isdigit() or not coluna:
+            raise ValueError("mover precisa de uid numérico e coluna")
+        lista = self._lista(coluna)
+        try:
+            card = self._api("GET", f"boards/{self._quadro['id']}/cards/{uid}", fields="id,name,due")
+        except RuntimeError as e:
+            if " 404 " in str(e):
+                raise ValueError(f"card #{uid} não existe no quadro") from None
+            raise
+        params = {"idList": lista["id"], "pos": "bottom"}
+        if card.get("due"):
+            params["dueComplete"] = str(self.e_feito(lista["name"])).lower()
+        self._api("PUT", f"cards/{card['id']}", **params)
+        return {"uid": uid, "resumo": f"#{uid} {card['name']}  →  {lista['name']}"}
+
+
+if __name__ == "__main__":
+    sys.exit(executar(Trello, __doc__))
