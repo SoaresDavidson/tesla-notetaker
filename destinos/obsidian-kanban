@@ -101,13 +101,17 @@ class ObsidianKanban(Destino):
             partes.append(f"🛫 {dt.date.fromisoformat(a['dtstart']).isoformat()}")
         if a.get("due"):
             partes.append(f"📅 {dt.date.fromisoformat(a['due']).isoformat()}")
+        partes.extend("#" + re.sub(r"\s+", "-", c.strip()) for c in a.get("categories") or [] if c.strip())
         partes.append(f"🆔 {uid}")
         card = " ".join(partes)
         if self.e_feito(coluna):
             card = marcar_feito(card)
         self.linhas.insert(self._posicao_no_fim(coluna), card)
         self.salvar()
-        return {"uid": uid, "resumo": f"{card[6:]}  →  {coluna}"}
+        ignorados = [nome for campo, nome in (("description", "descrição"), ("checklist", "checklist"),
+                                               ("size", "tamanho")) if a.get(campo)]
+        aviso = f" ({', '.join(ignorados)} não cabem no card do Obsidian)" if ignorados else ""
+        return {"uid": uid, "resumo": f"{card[6:]}  →  {coluna}{aviso}"}
 
     def mover(self, a: dict) -> dict:
         uid, coluna = str(a.get("uid") or ""), a.get("coluna") or ""

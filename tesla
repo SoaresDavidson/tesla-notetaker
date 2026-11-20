@@ -10,7 +10,9 @@ Recebe o texto por --texto ou pelo stdin (o voxtype manda a transcrição pelo s
   Adicionar: "<nome> [prioridade X] [começo <data>] [fim <data>] [na coluna <coluna>]"
   Mover:     "mover <uid> para <coluna>"
 
-Campo não falado fica em branco. O destino (configurado em ~/.config/tesla/config.toml)
+Com --parser llm a frase pode ser livre ("tenho que entregar a lista de segurança até
+sexta, é urgente: resolver as questões e revisar"), e o LLM preenche também etiquetas,
+descrição, checklist e tamanho. Campo não falado fica em branco. O destino (configurado em ~/.config/tesla/config.toml)
 é um executável que segue o PROTOCOLO.md.
 """
 
@@ -80,6 +82,10 @@ class Adicionar:
     dtstart: dt.date | None = None
     due: dt.date | None = None
     coluna: str | None = None
+    description: str | None = None
+    categories: list[str] = field(default_factory=list)
+    checklist: list[str] = field(default_factory=list)
+    size: str | None = None
     avisos: list[str] = field(default_factory=list)
 
     def json(self) -> dict:
@@ -87,7 +93,9 @@ class Adicionar:
                 "priority": self.priority,
                 "dtstart": self.dtstart.isoformat() if self.dtstart else None,
                 "due": self.due.isoformat() if self.due else None,
-                "coluna": self.coluna}
+                "coluna": self.coluna,
+                "description": self.description, "categories": self.categories,
+                "checklist": self.checklist, "size": self.size}
 
 
 @dataclass
@@ -138,6 +146,13 @@ def data_falada(texto: str, hoje: dt.date) -> dt.date | None:
     base = dt.datetime.combine(hoje, dt.time())
     d = dateparser.parse(t, languages=["pt"], settings={
         "PREFER_DATES_FROM": "future", "RELATIVE_BASE": base, "DATE_ORDER": "DMY"})
+    if d and re.fullmatch(r"\d{1,2}", t) and d.date() < hoje:
+        # "dia 5" já passou neste mês: o dateparser não aplica PREFER_DATES_FROM a um dia solto.
+        ano, mes = (hoje.year + 1, 1) if hoje.month == 12 else (hoje.year, hoje.month + 1)
+        try:
+            return dt.date(ano, mes, int(t))
+        except ValueError:
+            return None
     return d.date() if d else None
 
 
@@ -217,67 +232,127 @@ class DateparserParser:
         return acao
 
 
+TAMANHOS = ["XS", "S", "M", "L", "XL"]
+
+
 class OllamaParser:
-    """LLM local com saída em JSON schema. Datas e colunas passam pela mesma normalização.
+    """LLM local com saída em JSON schema. Entende frase livre e preenche todos os campos.
 
     "mover <uid> para <coluna>" tem forma fixa e fica com a regex do DateparserParser:
     o LLM só extrai os campos de uma tarefa nova. Deixar o LLM escolher a ação fazia
     um modelo de 8B classificar frases comuns como "mover" e inventar um id.
+
+    Datas voltam como foram ditas ("sexta", "dia 25") e passam pelo mesmo data_falada do
+    outro parser: o LLM erra conta de calendário. Etiquetas e colunas só valem se existirem
+    no destino; o resto é descartado com aviso.
     """
 
-    SCHEMA = {
-        "type": "object",
-        "properties": {
-            "nome": {"type": ["string", "null"]},
-            "prioridade": {"type": ["string", "null"], "enum": [*PRIORIDADES, None]},
-            "inicio": {"type": ["string", "null"]},
-            "fim": {"type": ["string", "null"]},
-            "coluna": {"type": ["string", "null"]},
-        },
-        "required": ["nome", "prioridade", "inicio", "fim", "coluna"],
-    }
-
-    def __init__(self, url: str, modelo: str):
+    def __init__(self, url: str, modelo: str, etiquetas: list[str | dict] | None = None):
         self.url, self.modelo = url, modelo
+        itens = [e if isinstance(e, dict) else {"nome": e} for e in etiquetas or []]
+        self.etiquetas = [e["nome"] for e in itens]
+        self.exemplos = {e["nome"]: e.get("exemplos") or [] for e in itens}
+
+    def _schema(self) -> dict:
+        texto_ou_nulo = {"type": ["string", "null"]}
+        return {
+            "type": "object",
+            "properties": {
+                "nome": texto_ou_nulo,
+                "descricao": texto_ou_nulo,
+                "prioridade": {"type": ["string", "null"], "enum": [*PRIORIDADES, None]},
+                "inicio": texto_ou_nulo,
+                "fim": texto_ou_nulo,
+                "coluna": texto_ou_nulo,
+                "etiquetas": {"type": "array", "items": {"type": "string", "enum": self.etiquetas}}
+                if self.etiquetas else {"type": "array", "maxItems": 0},
+                "checklist": {"type": "array", "items": {"type": "string"}},
+                "tamanho": {"type": ["string", "null"], "enum": [*TAMANHOS, None]},
+            },
+            "required": ["nome", "descricao", "prioridade", "inicio", "fim", "coluna",
+                         "etiquetas", "checklist", "tamanho"],
+        }
+
+    def _prompt(self, texto: str, colunas: list[str], hoje: dt.date) -> str:
+        dias = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+        etiquetas = "".join(
+            f"\n  - {nome}" + (f" (tarefas que já usam: {'; '.join(self.exemplos[nome])})" if self.exemplos[nome] else "")
+            for nome in self.etiquetas) or " (nenhuma)"
+        return (
+            f"Hoje é {hoje.isoformat()} ({dias[hoje.weekday()]}).\n"
+            f"Colunas do quadro: {', '.join(colunas)}.\nEtiquetas do quadro:{etiquetas}\n"
+            "A frase abaixo foi falada e transcrita; descreve UMA tarefa nova. Preencha o JSON:\n"
+            "- nome: título curto da tarefa, no infinitivo, sem datas, prioridade, coluna nem detalhes "
+            "(ex.: 'entregar lista de segurança').\n"
+            "- descricao: os detalhes ditos que não couberam no nome nem nos outros campos (contexto, motivo, "
+            "observações), com as palavras da frase. Não acrescente interpretação nem conclusão. null se não houver.\n"
+            "- prioridade: maxima se a frase disser urgente, pra hoje ou muito importante; alta se disser "
+            "importante; baixa se disser sem pressa, quando der ou se sobrar tempo; minima se disser que tanto faz; "
+            "media se disser normal. Se a frase não falar de urgência ou importância, null.\n"
+            "- inicio: a expressão de data de quando a tarefa começa ('a partir de segunda', 'começo dia 3'), "
+            "copiada como foi dita, sem calcular; null se não houver.\n"
+            "- fim: a expressão de data do prazo ou de quando fazer ('até sexta', 'pra amanhã', 'entrega dia 25', "
+            "'semana que vem'), copiada como foi dita, sem calcular. Uma data sem palavra de começo vai aqui. "
+            "null se não houver.\n"
+            "- coluna: uma das colunas do quadro, só se a frase disser o nome dela; null caso contrário.\n"
+            "- etiquetas: as etiquetas do quadro do mesmo assunto da frase. Compare com as tarefas que já usam "
+            "cada etiqueta. Etiqueta de repetição "
+            "(diário, semanal) só se a frase disser que a tarefa se repete. Na dúvida, deixe de fora: lista vazia "
+            "é melhor que etiqueta errada. Use só nomes da lista.\n"
+            "- checklist: passos ou subtarefas que a frase enumera, cada um curto e no infinitivo; "
+            "lista vazia se a frase não enumerar passos. Não invente passos.\n"
+            "- tamanho: esforço estimado: XS (minutos), S (até 1 hora), M (algumas horas), L (um dia), "
+            "XL (vários dias); null se não der para estimar.\n"
+            "Exemplo: 'tenho que entregar a lista da prova 3 de segurança até sexta, é urgente, falta "
+            "resolver as questões 4 e 5 e revisar' -> nome 'entregar lista da prova 3 de segurança', "
+            "prioridade 'maxima', fim 'até sexta', checklist ['resolver questão 4', 'resolver questão 5', "
+            "'revisar'], tamanho 'M', descricao null.\n"
+            "Exemplo: 'lembrar de comprar café amanhã' -> nome 'comprar café', prioridade null, fim 'amanhã', "
+            "etiquetas [], checklist [], tamanho 'XS', descricao null.\n"
+            "Exemplo: 'ver com o professor sobre a bolsa semana que vem, ele pediu o histórico' -> nome "
+            "'ver com o professor sobre a bolsa', prioridade null, inicio null, fim 'semana que vem', "
+            "descricao 'ele pediu o histórico'.\n"
+            f"Frase: {texto}"
+        )
 
     def interpretar(self, texto: str, colunas: list[str], hoje: dt.date) -> Acao:
         regex = DateparserParser()
         if regex.MOVER.match(chave(re.sub(r"[.,;:!?]", " ", texto)).strip()):
             return regex.interpretar(texto, colunas, hoje)
-        dias = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
-        prompt = (
-            f"Hoje é {hoje.isoformat()} ({dias[hoje.weekday()]}). Colunas do quadro: {', '.join(colunas)}.\n"
-            "Converta a frase falada, que descreve uma tarefa nova, em JSON.\n"
-            "- nome: o nome completo da tarefa, com todas as palavras, tirando só prioridade, datas e coluna.\n"
-            "- inicio: só a data que vem depois de 'começo', 'início' ou 'a partir de', copiada como foi dita; senão null.\n"
-            "- fim: só a data que vem depois de 'fim', 'prazo', 'até', 'entrega' ou 'vence', copiada como foi dita; senão null.\n"
-            "  Uma data depois de 'prazo' vai sempre em fim, nunca em inicio.\n"
-            "- prioridade: maxima (ou urgente), alta, media (ou normal), baixa ou minima, só se a frase disser; senão null.\n"
-            "- coluna: uma das colunas, só se a frase disser; senão null.\n"
-            "Exemplo: 'estudar prova de rede prioridade alta prazo amanhã' -> nome 'estudar prova de rede', "
-            "prioridade 'alta', inicio null, fim 'amanhã', coluna null.\n"
-            f"Frase: {texto}"
-        )
         # keep_alive 0: o modelo sai da VRAM logo após responder.
         corpo = json.dumps({
-            "model": self.modelo, "prompt": prompt, "format": self.SCHEMA, "stream": False,
-            "think": False, "keep_alive": 0, "options": {"temperature": 0},
+            "model": self.modelo, "prompt": self._prompt(texto, colunas, hoje), "format": self._schema(),
+            "stream": False, "think": False, "keep_alive": 0, "options": {"temperature": 0},
         }).encode()
         req = urllib.request.Request(f"{self.url}/api/generate", corpo, {"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             r = json.loads(json.loads(resp.read())["response"])
 
         coluna = coluna_falada(r["coluna"], colunas) if r.get("coluna") else None
+        if coluna and chave(coluna) not in chave(texto):  # o LLM escolhe coluna sem a frase pedir
+            coluna = None
         acao = Adicionar(limpar_nome(r.get("nome") or ""), coluna=coluna)
+        descricao = (r.get("descricao") or "").strip()
+        # O LLM às vezes devolve a frase inteira como descrição: isso não acrescenta nada ao card.
+        if descricao and difflib.SequenceMatcher(None, chave(descricao), chave(texto)).ratio() < 0.8:
+            acao.description = descricao
         # A palavra dita depois de "prioridade" vale mais que a escolha do LLM ("urgente" virava alta).
         falada = re.search(r"\bprioridade\s+(\w+)", chave(texto))
         acao.priority = (falada and prioridade_falada(falada.group(1))) or (
             prioridade_falada(r["prioridade"]) if r.get("prioridade") else None)
         for campo_llm, campo in (("inicio", "dtstart"), ("fim", "due")):
             if r.get(campo_llm):
-                setattr(acao, campo, data_falada(r[campo_llm], hoje))
+                expressao = re.sub(r"^(?:ate|até|a partir de|desde|pra|para|entrega|vence|prazo|comeco|começo|inicio|início)\s+",
+                                   "", r[campo_llm].strip(), flags=re.I)
+                setattr(acao, campo, data_falada(expressao, hoje) or data_falada(r[campo_llm], hoje))
                 if getattr(acao, campo) is None:
                     acao.avisos.append(f"{campo_llm} não entendido: '{r[campo_llm]}'")
+        if acao.dtstart and not acao.due and not re.search(r"\b(?:a partir|comec|inici|desde)", chave(texto)):
+            acao.dtstart, acao.due = None, acao.dtstart  # data sem palavra de começo é prazo
+        por_chave = {chave(e): e for e in self.etiquetas}
+        acao.categories = list(dict.fromkeys(por_chave[chave(e)] for e in r.get("etiquetas") or [] if chave(e) in por_chave))
+        acao.checklist = [i.strip() for i in r.get("checklist") or [] if i.strip()]
+        acao.size = r.get("tamanho") if r.get("tamanho") in TAMANHOS else None
         return acao
 
 
@@ -293,6 +368,14 @@ def chamar_destino(destino: list[str], subcomando: str, entrada: dict | None = N
     if proc.returncode != 0:
         raise ErroDestino(proc.stderr.strip() or f"destino saiu com código {proc.returncode}")
     return json.loads(proc.stdout)
+
+
+def etiquetas_do_destino(destino: list[str]) -> list[str]:
+    """O subcomando etiquetas é opcional no protocolo: destino sem ele fica sem etiquetas."""
+    try:
+        return chamar_destino(destino, "etiquetas")
+    except (ErroDestino, json.JSONDecodeError):
+        return []
 
 
 # ---------------------------------------------------------------- main
@@ -320,7 +403,10 @@ def main() -> int:
             acao_json, avisos = json.loads(texto), []
         else:
             colunas = chamar_destino(config.destino, "colunas")
-            parser = OllamaParser(config.llm_url, config.llm_modelo) if args.parser == "llm" else DateparserParser()
+            if args.parser == "llm":
+                parser = OllamaParser(config.llm_url, config.llm_modelo, etiquetas_do_destino(config.destino))
+            else:
+                parser = DateparserParser()
             acao = parser.interpretar(texto, colunas, dt.date.today())
             if isinstance(acao, Mover) and not acao.coluna:
                 raise ValueError("; ".join(acao.avisos))

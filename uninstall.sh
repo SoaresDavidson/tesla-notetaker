@@ -54,6 +54,14 @@ fi
 rm -f -- "$ESTADO/instalacao.env"
 rmdir -- "$ESTADO" 2>/dev/null || true
 
+UNIDADES=$CFG/systemd/user
+if [[ -f $UNIDADES/tesla-trello-manter.timer ]]; then
+    [[ $ATIVAR == 1 ]] && { systemctl --user disable --now tesla-trello-manter.timer >/dev/null 2>&1 || true; }
+    rm -f -- "$UNIDADES/tesla-trello-manter.timer" "$UNIDADES/tesla-trello-manter.service"
+    [[ $ATIVAR == 1 ]] && systemctl --user daemon-reload
+    info "removido: timer tesla-trello-manter"
+fi
+
 if [[ $ATIVAR == 1 ]]; then
     systemctl --user is-active -q voxtype && systemctl --user restart voxtype
     [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && hyprctl reload >/dev/null

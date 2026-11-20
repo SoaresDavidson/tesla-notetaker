@@ -28,6 +28,26 @@ O campo que você não falar fica em branco. No Obsidian, cada card recebe um �
 
 Datas aceitas: hoje, amanhã, depois de amanhã, sexta, segunda que vem, dia 20, 20 de novembro, 20/11, daqui a 3 dias, semana que vem.
 
+### Frase livre (parser LLM)
+
+Com `SUPER+SHIFT+Y` você fala do jeito que quiser, e o LLM preenche também etiquetas, descrição, checklist e tamanho:
+
+> "tenho que entregar a lista da prova 3 de segurança até sexta, é urgente, o professor pediu em pdf, falta resolver as questões 4 e 5 e revisar"
+
+vira o card "entregar lista da prova 3 de segurança", com prioridade máxima, prazo na sexta, a etiqueta `materias`, a descrição "o professor pediu em pdf..." e um checklist com "resolver questão 4", "resolver questão 5" e "revisar".
+
+| Campo | Como o LLM decide |
+|---|---|
+| prioridade | pelo tom: urgente, importante, sem pressa, quando der. Sem nada disso, fica em branco, mas o modelo às vezes chuta. "prioridade X" dito com essas palavras sempre vence |
+| começo e fim | a data como você falou, convertida pelo mesmo código do outro parser. Uma data sem "a partir de" ou "começo" vira prazo |
+| coluna | só quando você diz o nome da coluna |
+| etiquetas | só entre as que o destino já tem. O LLM recebe, para cada etiqueta, as tarefas que já a usam, e decide pelo assunto |
+| descrição | o que você disse além do nome e dos outros campos |
+| checklist | os passos que você enumerou. O LLM não inventa passos |
+| tamanho | estimativa de esforço: XS (minutos) a XL (vários dias) |
+
+Cada frase leva de 13 a 30 segundos com o `qwen3:30b-a3b-instruct-2507` num servidor Ollama: o modelo é carregado a cada pedido e sai da VRAM ao responder.
+
 ## Atalhos
 
 | Tecla | Efeito |
@@ -72,6 +92,7 @@ O que ele altera no sistema:
 | `~/.config/tesla/config.toml` | destino e LLM (ver `config.example.toml`) |
 | `~/.config/tesla/trello.json` | chave e token do Trello, com permissão 600, se você escolher esse destino |
 | `~/.config/voxtype/config.toml` | só as chaves `hotkey.enabled`, `whisper.model/language/on_demand_loading/gpu_isolation/gpu_device` e `output.notification.*`. Os valores anteriores ficam em `~/.local/state/tesla/voxtype-backup.json` |
+| `~/.config/systemd/user/tesla-trello-manter.{service,timer}` | só com o destino Trello: o timer do `manter` |
 | `~/.config/hypr/config/tesla.lua` | symlink com os atalhos |
 | `~/.config/hypr/hyprland.lua` | uma linha `require("config.tesla")` |
 | systemd | `systemctl --user enable` e `restart voxtype` |
@@ -117,8 +138,9 @@ Cada tarefa vira uma issue em `--repo`, adicionada ao project `--projeto` (o nú
 | prioridade | `Priority` | a opção com o mesmo nome: Urgente ou Máxima, Alta, Média ou Normal, Baixa, Mínima. Também aceita P0, P1 e P2 |
 | começo | `Start date` | data |
 | fim | `Target date` | data |
+| tamanho | `Size` | a opção com o mesmo nome (XS a XL) |
 
-Mover para "Feito" fecha a issue como concluída; tirar de "Feito" reabre. Os nomes podem ser trocados com `--campo-status`, `--campo-prioridade`, `--campo-inicio`, `--campo-prazo`, `--coluna-padrao` e `--coluna-feito`. Se o project for de uma organização diferente do dono do repositório, passe `--dono`.
+As etiquetas viram labels da issue (só as que já existem no repositório), e a descrição e o checklist vão para o corpo da issue, com o checklist como lista de tarefas do Markdown. Mover para "Feito" fecha a issue como concluída; tirar de "Feito" reabre. Os nomes podem ser trocados com `--campo-status`, `--campo-prioridade`, `--campo-inicio`, `--campo-prazo`, `--campo-tamanho`, `--coluna-padrao` e `--coluna-feito`. Se o project for de uma organização diferente do dono do repositório, passe `--dono`.
 
 Cada comando faz de 3 a 5 chamadas à API do GitHub, então a notificação demora um ou dois segundos a mais que no Obsidian.
 
@@ -135,8 +157,20 @@ destino = ["~/.local/bin/tesla-destino-trello", "--quadro", "AbCd1234"]
 | prioridade | a etiqueta com o nome do nível (Alta, Média, Baixa...), com ou sem o prefixo `Prioridade:`. Sem etiqueta correspondente, a prioridade é ignorada e a notificação avisa |
 | começo | data de início |
 | fim | data de entrega |
+| etiquetas | as etiquetas com o mesmo nome. As de prioridade e de tamanho ficam fora da lista que o LLM vê |
+| tamanho | a etiqueta `Size: <tamanho>`, se existir |
+| descrição | a descrição do card |
+| checklist | um checklist "Passos" no card |
 
 Mover para "Feito" marca a data de entrega como concluída; tirar de "Feito" desmarca.
+
+Com o destino Trello, o instalador também ativa o timer `tesla-trello-manter`, que roda `tesla-destino-trello manter` a cada 2 minutos e faz três coisas no quadro:
+
+1. Card com checklist de progresso (qualquer nome menos "Passos", como "Capítulos" ou "Aulas") que você conclui, movendo para "Feito" ou marcando a data de entrega, tem o próximo item marcado e volta para "A fazer" com prazo novo. No último item, ele fica em "Feito". Assim, "ler livro de 33 capítulos" avança um capítulo a cada conclusão.
+2. Card em "A fazer" sem data ganha prazo de 3 dias (`--prazo-dias`).
+3. Se "A fazer" tem menos de 4 cards (`--minimo`), o timer puxa os primeiros de "pessoal" e depois de "fixo" (`--reserva`).
+
+Para ver o que ele faria sem mudar nada: `tesla-destino-trello --quadro <id> manter --simular`. O log fica em `journalctl --user -u tesla-trello-manter`.
 
 ## GPU
 

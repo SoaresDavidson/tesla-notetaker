@@ -72,6 +72,14 @@ class Destino(ABC):
     @abstractmethod
     def colunas(self) -> list[str]: ...
 
+    def etiquetas(self) -> list[str | dict]:
+        """Etiquetas que a ação pode mandar em categories. Destino sem etiquetas devolve [].
+
+        Cada item é o nome ou {"nome", "exemplos"}, em que exemplos são títulos de tarefas que
+        já usam a etiqueta: o LLM entende o assunto da etiqueta por eles.
+        """
+        return []
+
     @abstractmethod
     def adicionar(self, acao: dict) -> dict:
         """Devolve {"uid", "resumo"}."""
@@ -96,13 +104,13 @@ def executar(classe: type[Destino], doc: str | None = None) -> int:
     classe.argumentos(ap)
     ap.add_argument("--coluna-padrao", default="A fazer")
     ap.add_argument("--coluna-feito", default="Feito")
-    ap.add_argument("subcomando", choices=["colunas", "aplicar", *classe.extras])
+    ap.add_argument("subcomando", choices=["colunas", "etiquetas", "aplicar", *classe.extras])
     args = ap.parse_args()
 
     try:
         destino = classe(args)
-        if args.subcomando == "colunas":
-            print(json.dumps(destino.colunas(), ensure_ascii=False))
+        if args.subcomando in ("colunas", "etiquetas"):
+            print(json.dumps(getattr(destino, args.subcomando)(), ensure_ascii=False))
         elif args.subcomando == "aplicar":
             print(json.dumps(destino.aplicar(json.loads(sys.stdin.read())), ensure_ascii=False))
         else:

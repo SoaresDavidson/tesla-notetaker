@@ -275,6 +275,41 @@ if [[ $ATIVAR == 1 ]]; then
     systemctl --user enable voxtype >/dev/null 2>&1 || true
     systemctl --user restart voxtype
     info "voxtype: $(systemctl --user is-active voxtype)"
+    # Destino Trello: timer que roda `tesla-destino-trello manter` a cada 2 minutos.
+    quadro_trello=$(python3 -c 'import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb")).get("destino", [])
+print(d[d.index("--quadro") + 1] if d and d[0].endswith("tesla-destino-trello") and "--quadro" in d else "")' "$CONFIG")
+    UNIDADES=$CFG/systemd/user
+    if [[ -n $quadro_trello ]]; then
+        mkdir -p "$UNIDADES"
+        cat >"$UNIDADES/tesla-trello-manter.service" <<EOF
+[Unit]
+Description=tesla: arruma o quadro do Trello (checklists de progresso, prazos, mínimo de cards)
+
+[Service]
+Type=oneshot
+ExecStart=$BIN/tesla-destino-trello --quadro $quadro_trello manter
+EOF
+        cat >"$UNIDADES/tesla-trello-manter.timer" <<'EOF'
+[Unit]
+Description=tesla: roda o manter do Trello a cada 2 minutos
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl --user daemon-reload
+        systemctl --user enable --now tesla-trello-manter.timer >/dev/null 2>&1
+        info "tesla-trello-manter.timer: $(systemctl --user is-active tesla-trello-manter.timer)"
+    elif [[ -f $UNIDADES/tesla-trello-manter.timer ]]; then
+        systemctl --user disable --now tesla-trello-manter.timer >/dev/null 2>&1 || true
+        rm -f -- "$UNIDADES/tesla-trello-manter.timer" "$UNIDADES/tesla-trello-manter.service"
+        systemctl --user daemon-reload
+        info "destino não é Trello: timer tesla-trello-manter removido"
+    fi
     if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
         hyprctl reload >/dev/null && info "hyprctl reload: ok"
     fi

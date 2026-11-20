@@ -3,6 +3,7 @@
 
 Subcomandos (ver PROTOCOLO.md):
   colunas    imprime as opções do campo Status do project em JSON
+  etiquetas  imprime as labels do repositório em JSON
   aplicar    lê uma ação JSON do stdin e aplica no project
 
 O uid é o número da issue ("mover 14 para feito"). Usa o `gh` já autenticado,
@@ -51,6 +52,7 @@ class GithubProjects(Destino):
         ap.add_argument("--campo-prioridade", default="Priority")
         ap.add_argument("--campo-inicio", default="Start date")
         ap.add_argument("--campo-prazo", default="Target date")
+        ap.add_argument("--campo-tamanho", default="Size")
 
     def __init__(self, args: argparse.Namespace):
         super().__init__(args)
@@ -61,7 +63,7 @@ class GithubProjects(Destino):
                 ... on User {{ projectV2(number: $numero) {{ id {CAMPOS} }} }}
                 ... on Organization {{ projectV2(number: $numero) {{ id {CAMPOS} }} }}
               }}
-              repository(owner: $dono, name: $repo) {{ id }}
+              repository(owner: $dono, name: $repo) {{ id labels(first: 100) {{ nodes {{ id name }} }} }}
             }}""", dono=args.dono or dono, repo=self.repo_nome, numero=args.projeto)
         projeto = (d["repositoryOwner"] or {}).get("projectV2")
         if not projeto:
@@ -70,6 +72,7 @@ class GithubProjects(Destino):
             raise ValueError(f"repositório {args.repo} não encontrado")
         self.dono, self.id, self.repo_id = dono, projeto["id"], d["repository"]["id"]
         self.campos = {chave(c["name"]): c for c in projeto["fields"]["nodes"] if c}
+        self.labels = {chave(l["name"]): l for l in d["repository"]["labels"]["nodes"]}
 
     def campo(self, nome: str) -> dict | None:
         return self.campos.get(chave(nome))
@@ -79,6 +82,9 @@ class GithubProjects(Destino):
         if not status or "options" not in status:
             raise ValueError(f"o project não tem o campo de seleção '{self.args.campo_status}'")
         return [o["name"] for o in status["options"]]
+
+    def etiquetas(self) -> list[str]:
+        return [l["name"] for l in self.labels.values()]
 
     def _opcao(self, campo: dict, nome: str) -> dict:
         opcao = next((o for o in campo["options"] if chave(o["name"]) == chave(nome)), None)
@@ -167,10 +173,34 @@ class GithubProjects(Destino):
                 else:
                     avisos.append(f"{rotulo} ignorado (falta o campo '{nome_campo}')")
 
+        if a.get("size"):
+            campo = self.campo(self.args.campo_tamanho)
+            opcao = campo and next((o for o in campo.get("options", []) if chave(o["name"]) == chave(a["size"])), None)
+            if opcao:
+                valores["tamanho"] = (campo, ("singleSelectOptionId", opcao["id"]))
+                extras.append(opcao["name"])
+            else:
+                avisos.append(f"tamanho {a['size']} ignorado")
+        labels = []
+        for nome in a.get("categories") or []:
+            if chave(nome) in self.labels:
+                labels.append(self.labels[chave(nome)])
+            else:
+                avisos.append(f"label '{nome}' não existe")
+        if labels:
+            extras.append(", ".join(l["name"] for l in labels))
+        corpo = "\n\n".join(filter(None, [
+            a.get("description"),
+            "\n".join(f"- [ ] {p}" for p in a.get("checklist") or [] if p.strip()),
+        ]))
+
         issue = graphql("""
-            mutation($repo: ID!, $titulo: String!) {
-              createIssue(input: {repositoryId: $repo, title: $titulo}) { issue { id number } }
-            }""", repo=self.repo_id, titulo=summary)["createIssue"]["issue"]
+            mutation($repo: ID!, $titulo: String!, $corpo: String, $labels: [ID!]) {
+              createIssue(input: {repositoryId: $repo, title: $titulo, body: $corpo, labelIds: $labels}) {
+                issue { id number }
+              }
+            }""", repo=self.repo_id, titulo=summary, corpo=corpo or None,
+            labels=[l["id"] for l in labels] or None)["createIssue"]["issue"]
         item = self._adicionar_item(issue["id"])
         self._atualizar(item, valores)
         if self.e_feito(coluna):

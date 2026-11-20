@@ -20,6 +20,16 @@ Imprime no stdout um array JSON com os nomes das colunas (ou listas, ou estados)
 
 O miolo usa essa lista para reconhecer a coluna falada ("na coluna fazendo"). Um destino sem colunas pode devolver `[]`.
 
+### `etiquetas` (opcional)
+
+Imprime no stdout um array JSON com as etiquetas (labels, tags, categorias) que a ação pode usar em `categories`. Cada item é um nome ou um objeto com exemplos de tarefas que já usam a etiqueta:
+
+```json
+["pessoal", {"nome": "materias", "exemplos": ["fazer lista da prova 3", "estudar compiladores"]}]
+```
+
+O parser LLM só escolhe etiquetas desta lista e usa os exemplos para entender o assunto de cada uma. Se o destino não tiver esse subcomando (sai com código ≠ 0), o miolo segue sem etiquetas.
+
 ### `aplicar`
 
 Lê uma única ação JSON do stdin e aplica. Em sucesso, sai com código 0 e imprime:
@@ -57,6 +67,12 @@ Os nomes dos campos vêm do VTODO do iCalendar (RFC 5545), para que destinos bas
 | `dtstart` | `AAAA-MM-DD` ou `null` | quando começa |
 | `due` | `AAAA-MM-DD` ou `null` | prazo |
 | `coluna` | string ou `null` | uma das colunas que o destino listou. `null` = o destino escolhe a padrão |
+| `description` | string ou `null` | detalhes da tarefa (DESCRIPTION do VTODO) |
+| `categories` | lista de strings | etiquetas, sempre entre as que o subcomando `etiquetas` listou (CATEGORIES do VTODO) |
+| `checklist` | lista de strings | passos da tarefa, na ordem falada |
+| `size` | `XS`, `S`, `M`, `L`, `XL` ou `null` | esforço estimado |
+
+Os quatro últimos campos são opcionais: o parser dateparser os manda vazios e um destino pode ignorá-los. Um destino que não sabe gravar um campo deve avisar no `resumo` em vez de falhar.
 
 O destino gera o `uid`, porque é ele quem sabe quais já existem. Para a pessoa conseguir falar o uid ("mover 427 para feito"), prefira números curtos.
 

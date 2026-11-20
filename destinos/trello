@@ -3,11 +3,22 @@
 
 Subcomandos (ver PROTOCOLO.md):
   colunas    imprime as listas abertas do quadro em JSON
+  etiquetas  imprime as etiquetas do quadro que não são de prioridade nem de tamanho
   aplicar    lê uma ação JSON do stdin e aplica no quadro
   quadros    imprime os quadros abertos da conta (id curto e nome), um por linha
+  manter     arruma o quadro (feito para rodar num timer):
+             1. card concluído com checklist de progresso (qualquer checklist que não
+                seja "Passos", ex.: "Capítulos") marca o próximo item e volta para a
+                coluna padrão; no último item ele fica em Feito
+             2. card na coluna padrão sem prazo ganha prazo de --prazo-dias dias
+             3. se a coluna padrão tem menos de --minimo cards, puxa o primeiro card
+                de cada lista em --reserva, na ordem, até completar
+             Com --simular, só imprime o que faria.
 
 O uid é o número curto do card no quadro ("mover 12 para feito"). A prioridade vira a
-etiqueta com o nome do nível (Alta, Média, Baixa...), com ou sem o prefixo "Prioridade:".
+etiqueta com o nome do nível (Alta, Média, Baixa...), com ou sem o prefixo "Prioridade:",
+e o tamanho vira a etiqueta "Size: <tamanho>". categories são etiquetas pelo nome,
+description vai para a descrição e checklist vira um checklist "Passos".
 A chave e o token da API vêm de TRELLO_API_KEY e TRELLO_TOKEN ou, se elas não
 existirem, do arquivo de credenciais (padrão ~/.config/tesla/trello.json):
   {"key": "...", "token": "..."}
@@ -31,12 +42,21 @@ from protocolo import Destino, chave, executar, nomes_prioridade
 API = "https://api.trello.com/1/"
 
 
+PREFIXOS_PRIORIDADE = ("prioridade:", "priority:")
+
+
 def chave_etiqueta(nome: str) -> str:
     k = chave(nome)
-    for prefixo in ("prioridade:", "priority:"):
+    for prefixo in PREFIXOS_PRIORIDADE:
         if k.startswith(prefixo):
             return k[len(prefixo):].strip()
     return k
+
+
+def e_etiqueta_comum(nome: str) -> bool:
+    """Etiqueta de assunto: nem de prioridade nem de tamanho."""
+    k = chave(nome)
+    return bool(k) and not k.startswith((*PREFIXOS_PRIORIDADE, "size:", "tamanho:"))
 
 
 def credenciais(caminho: str) -> tuple[str, str]:
@@ -54,13 +74,18 @@ def credenciais(caminho: str) -> tuple[str, str]:
 
 
 class Trello(Destino):
-    extras = {"quadros": "quadros"}
+    extras = {"quadros": "quadros", "manter": "manter"}
 
     @classmethod
     def argumentos(cls, ap: argparse.ArgumentParser) -> None:
         ap.add_argument("--quadro", help="id ou id curto do quadro (o trecho depois de /b/ na URL)")
         ap.add_argument("--credenciais",
                         default=str(Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")) / "tesla/trello.json"))
+        ap.add_argument("--minimo", type=int, default=4, help="manter: cards na coluna padrão (padrão 4)")
+        ap.add_argument("--prazo-dias", type=int, default=3, help="manter: prazo de quem entra sem data (padrão 3)")
+        ap.add_argument("--reserva", default="pessoal,fixo",
+                        help="manter: listas de onde puxar cards, em ordem, separadas por vírgula")
+        ap.add_argument("--simular", action="store_true", help="manter: só mostra o que faria")
 
     def __init__(self, args: argparse.Namespace):
         super().__init__(args)
@@ -109,21 +134,46 @@ class Trello(Destino):
     def colunas(self) -> list[str]:
         return [l["name"] for l in self._quadro["lists"]]
 
+    def etiquetas(self) -> list[dict]:
+        cards = self._api("GET", f"boards/{self._quadro['id']}/cards", fields="name,idLabels", filter="all")
+        return [{"nome": e["name"], "exemplos": [c["name"] for c in cards if e["id"] in c["idLabels"]][-5:]}
+                for e in self._quadro["labels"] if e.get("name") and e_etiqueta_comum(e["name"])]
+
+    def _etiqueta(self, nome: str) -> dict | None:
+        return next((e for e in self._quadro["labels"] if e.get("name") and chave(e["name"]) == chave(nome)), None)
+
     def adicionar(self, a: dict) -> dict:
         summary = (a.get("summary") or "").strip()
         if not summary:
             raise ValueError("summary vazio")
         lista = self._lista(a.get("coluna") or self.args.coluna_padrao)
         params = {"idList": lista["id"], "name": summary, "pos": "bottom"}
+        etiquetas: list[dict] = []
         extras, avisos = [], []
 
         if a.get("priority"):
             etiqueta = self._etiqueta_prioridade(int(a["priority"]))
             if etiqueta:
-                params["idLabels"] = etiqueta["id"]
-                extras.append(etiqueta["name"])
+                etiquetas.append(etiqueta)
             else:
                 avisos.append("prioridade ignorada (falta a etiqueta)")
+        if a.get("size"):
+            etiqueta = self._etiqueta(f"Size: {a['size']}")
+            if etiqueta:
+                etiquetas.append(etiqueta)
+            else:
+                avisos.append(f"tamanho {a['size']} ignorado (falta a etiqueta)")
+        for nome in a.get("categories") or []:
+            etiqueta = self._etiqueta(nome)
+            if etiqueta:
+                etiquetas.append(etiqueta)
+            else:
+                avisos.append(f"etiqueta '{nome}' não existe")
+        if etiquetas:
+            params["idLabels"] = ",".join(dict.fromkeys(e["id"] for e in etiquetas))
+            extras.append(", ".join(dict.fromkeys(e["name"] for e in etiquetas)))
+        if a.get("description"):
+            params["desc"] = a["description"]
         if a.get("dtstart"):
             inicio = dt.date.fromisoformat(a["dtstart"]).isoformat()
             params["start"] = inicio
@@ -136,6 +186,12 @@ class Trello(Destino):
             extras.append(f"prazo {prazo}")
 
         card = self._api("POST", "cards", **params)
+        passos = [p for p in a.get("checklist") or [] if p.strip()]
+        if passos:
+            checklist = self._api("POST", "checklists", idCard=card["id"], name="Passos")
+            for passo in passos:
+                self._api("POST", f"checklists/{checklist['id']}/checkItems", name=passo, pos="bottom")
+            extras.append(f"{len(passos)} passos")
         uid = str(card["idShort"])
         resumo = " · ".join([f"#{uid} {summary}", *extras]) + f"  →  {lista['name']}"
         if avisos:
@@ -158,6 +214,57 @@ class Trello(Destino):
             params["dueComplete"] = str(self.e_feito(lista["name"])).lower()
         self._api("PUT", f"cards/{card['id']}", **params)
         return {"uid": uid, "resumo": f"#{uid} {card['name']}  →  {lista['name']}"}
+
+    # ------------------------------------------------------------------ manter
+
+    def _prazo_padrao(self) -> str:
+        return f"{dt.date.today() + dt.timedelta(days=self.args.prazo_dias)}T12:00:00.000Z"
+
+    def _mudar(self, card: dict, descricao: str, **params) -> None:
+        print(f"#{card['idShort']} {card['name']}: {descricao}")
+        if not self.args.simular:
+            self._api("PUT", f"cards/{card['id']}", **params)
+        card.update({k: v for k, v in params.items() if k in ("idList", "due")})
+
+    def manter(self) -> None:
+        padrao, feito = self._lista(self.args.coluna_padrao), self._lista(self.args.coluna_feito)
+        cards = [c for c in self._api("GET", f"boards/{self._quadro['id']}/cards/open", checklists="all",
+                                      fields="name,idShort,idList,due,dueComplete,pos,isTemplate")
+                 if not c["isTemplate"]]
+        cards.sort(key=lambda c: c["pos"])
+
+        # 1. Progresso: concluir o card conta como concluir o próximo item do checklist.
+        for c in cards:
+            if c["idList"] != feito["id"] and not c["dueComplete"]:
+                continue
+            itens = [i for cl in sorted(c["checklists"], key=lambda cl: cl["pos"]) if cl["name"] != "Passos"
+                     for i in sorted(cl["checkItems"], key=lambda i: i["pos"])]
+            pendentes = [i for i in itens if i["state"] != "complete"]
+            if not pendentes:
+                continue
+            print(f"#{c['idShort']} {c['name']}: item concluído: {pendentes[0]['name']}")
+            if not self.args.simular:
+                self._api("PUT", f"cards/{c['id']}/checkItem/{pendentes[0]['id']}", state="complete")
+            if len(pendentes) > 1:
+                self._mudar(c, f"volta para {padrao['name']} ({len(itens) - len(pendentes) + 1}/{len(itens)})",
+                            idList=padrao["id"], pos="bottom", dueComplete="false", due=self._prazo_padrao())
+            elif c["idList"] != feito["id"]:
+                self._mudar(c, f"último item, vai para {feito['name']}", idList=feito["id"], pos="bottom")
+
+        # 2. Ninguém fica sem prazo na coluna padrão. 3. A coluna padrão nunca fica com menos de --minimo.
+        def na_padrao() -> list[dict]:
+            return [c for c in cards if c["idList"] == padrao["id"]]
+
+        for nome in [n.strip() for n in self.args.reserva.split(",") if n.strip()]:
+            reserva = self._lista(nome)
+            for c in [c for c in cards if c["idList"] == reserva["id"]]:
+                if len(na_padrao()) >= self.args.minimo:
+                    break
+                self._mudar(c, f"puxado de {reserva['name']} para {padrao['name']}", idList=padrao["id"], pos="bottom")
+        for c in na_padrao():
+            if not c["due"]:
+                prazo = self._prazo_padrao()
+                self._mudar(c, f"prazo {prazo[:10]}", due=prazo, dueComplete="false")
 
 
 if __name__ == "__main__":
